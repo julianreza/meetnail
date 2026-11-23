@@ -185,7 +185,13 @@ test('CodexLiveSession fences late RPC notifications on disposed/completed turns
   assert.ok(jsCalls.some(s => s.includes('codexCancelAndClear') && s.includes('codexResetTurnState?.(true)')));
 });
 
-function createMediaSandbox({sampleProvider}) {
+function createMediaSandbox({
+  sampleProvider,
+  enableScriptProcessor = true,
+  scriptProcessorIntervalMs = 15,
+  hostname = 'meet.google.com',
+  initialIceGatheringState = 'complete',
+} = {}) {
   const source = readFileSync(join(__dirname, '../NAIL/Resources/meet-media.cjs'), 'utf8');
   // Extract installMedia(...) up to helper boundary before isAllowedMediaOrigin
   const endIdx = source.indexOf('\nfunction isAllowedMediaOrigin');
@@ -194,14 +200,16 @@ function createMediaSandbox({sampleProvider}) {
 
   let exposedApi = null;
   let currentTimeS = 100;
-  let currentSamples = new Float32Array(256);
   const dcSent = [];
   let createdDataChannel = null;
+  const createdDelays = [];
+  const createdScriptProcessors = [];
+  const createdPeers = [];
 
   class FakeGainNode {
-    constructor() { this.gain = {value: 1}; }
+    constructor() { this.gain = {value: 1}; this.disconnected = false; }
     connect() { return this; }
-    disconnect() {}
+    disconnect() { this.disconnected = true; }
   }
   class FakeAnalyserNode {
     constructor(isMic = false) { this.fftSize = 256; this.isMic = isMic; }
@@ -216,8 +224,55 @@ function createMediaSandbox({sampleProvider}) {
       for (let i = 0; i < buf.length; i++) buf[i] = next[i] ?? 0;
     }
   }
+  class FakeScriptProcessorNode {
+    constructor(bufferSize = 2048) {
+      this.bufferSize = bufferSize;
+      this.onaudioprocess = null;
+      this.disconnected = false;
+      this._timer = setInterval(() => {
+        if (this.disconnected || typeof this.onaudioprocess !== 'function') return;
+        const next = sampleProvider();
+        const chan = new Float32Array(this.bufferSize);
+        if (next && next.length > 0) {
+          for (let i = 0; i < this.bufferSize; i++) {
+            chan[i] = next[i % next.length] ?? 0;
+          }
+        }
+        this.onaudioprocess({
+          inputBuffer: {
+            numberOfChannels: 1,
+            length: this.bufferSize,
+            sampleRate: 48000,
+            getChannelData: () => chan,
+          },
+        });
+      }, scriptProcessorIntervalMs);
+      createdScriptProcessors.push(this);
+    }
+    connect() { return this; }
+    disconnect() {
+      this.disconnected = true;
+      if (this._timer) {
+        clearInterval(this._timer);
+        this._timer = null;
+      }
+    }
+  }
+  const makeFakeTrack = (id = 'out-1') => ({
+    id,
+    kind: 'audio',
+    readyState: 'live',
+    enabled: true,
+    muted: false,
+    stop() { this.readyState = 'ended'; },
+    clone() { return makeFakeTrack(`${id}-clone`); },
+    getSettings() { return {}; },
+  });
   class FakeMediaStreamDestination {
-    constructor() { this.stream = {getAudioTracks: () => [{id: 'out-1', stop() {}}]}; }
+    constructor() {
+      const track = makeFakeTrack('out-1');
+      this.stream = {getAudioTracks: () => [track], getTracks: () => [track]};
+    }
   }
   class FakeAudioBuffer {
     constructor({length, sampleRate}) {
@@ -248,7 +303,11 @@ function createMediaSandbox({sampleProvider}) {
     get currentTime() { return currentTimeS; }
     resume() { return Promise.resolve(); }
     createGain() { return new FakeGainNode(); }
-    createDelay() { return {delayTime: {value: 0}, connect() { return this; }, disconnect() {}}; }
+    createDelay() {
+      const node = {delayTime: {value: 0}, connect() { return this; }, disconnect() {}};
+      createdDelays.push(node);
+      return node;
+    }
     createConstantSource() { return {offset: {value: 0}, connect() { return this; }, disconnect() {}, start() {}, stop() {}}; }
     createAnalyser() { return new FakeAnalyserNode(false); }
     createMediaStreamDestination() { return new FakeMediaStreamDestination(); }
@@ -265,6 +324,11 @@ function createMediaSandbox({sampleProvider}) {
         getChannelData: () => new Float32Array(960),
       });
     }
+  }
+  if (enableScriptProcessor) {
+    FakeAudioContext.prototype.createScriptProcessor = function (bufferSize = 2048) {
+      return new FakeScriptProcessorNode(bufferSize);
+    };
   }
 
   class FakeMediaStream {
@@ -323,7 +387,9 @@ function createMediaSandbox({sampleProvider}) {
       super();
       this.connectionState = 'connected';
       this.iceConnectionState = 'connected';
-      this.iceGatheringState = 'complete';
+      this.iceGatheringState = initialIceGatheringState;
+      this._senders = [];
+      createdPeers.push(this);
     }
     addTrack() {}
     createDataChannel(label) { return new FakeDataChannel(label); }
@@ -332,7 +398,8 @@ function createMediaSandbox({sampleProvider}) {
     setRemoteDescription(d) { this.remoteDescription = d; return Promise.resolve(); }
     close() { this.connectionState = 'closed'; }
     getStats() { return Promise.resolve(new Map()); }
-    getSenders() { return []; }
+    getSenders() { return this._senders; }
+    getTransceivers() { return []; }
     addEventListener(type, fn) { this.on(type, fn); }
     removeEventListener(type, fn) { this.off(type, fn); }
   }
@@ -345,8 +412,12 @@ function createMediaSandbox({sampleProvider}) {
     stop() {},
     addEventListener() {},
   };
+  const FakeMediaStreamTrack = class {};
+  FakeMediaStreamTrack.prototype.clone = function () {
+    return makeFakeTrack(`${this.id || 'trk'}-clone`);
+  };
   const windowObj = {
-    location: {hostname: 'meet.google.com', origin: 'https://meet.google.com'},
+    location: {hostname, origin: `https://${hostname}`},
     AudioContext: FakeAudioContext,
     Audio: class FakeAudio {
       constructor() { this.muted = false; this.srcObject = null; }
@@ -354,7 +425,7 @@ function createMediaSandbox({sampleProvider}) {
       pause() {}
     },
     MediaStream: FakeMediaStream,
-    MediaStreamTrack: class {},
+    MediaStreamTrack: FakeMediaStreamTrack,
     MediaRecorder: FakeMediaRecorder,
     RTCPeerConnection: FakeRTCPeerConnection,
     HTMLMediaElement: {prototype: {}},
@@ -386,6 +457,7 @@ function createMediaSandbox({sampleProvider}) {
     Set,
     Map,
     Uint8Array,
+    Int16Array,
     Float32Array,
     Object,
     Array,
@@ -413,7 +485,12 @@ function createMediaSandbox({sampleProvider}) {
   return {
     windowObj,
     api: exposedApi,
+    meetPc,
     dcSent,
+    createdDelays,
+    createdScriptProcessors,
+    createdPeers,
+    makeFakeTrack,
     getDataChannel: () => createdDataChannel,
   };
 }
@@ -554,4 +631,183 @@ test('CodexLiveSession ignores benign cancellation errors and avoids splitting i
     CodexLiveSession.shouldCompleteTurn(state, 5, 1000, 1600, {dcReplyDone: true, serverResponseInFlight: false}),
     true
   );
+});
+
+test('meet-media.cjs codexConnect sets inPreRoll=0.10, outDelay=0.015, and uses 80ms srflx ICE timer', async () => {
+  const sandbox = createMediaSandbox({
+    sampleProvider: () => new Float32Array(256).fill(0),
+    initialIceGatheringState: 'gathering',
+  });
+
+  const startedAt = Date.now();
+  const connectPromise = sandbox.api.codexConnect();
+  await new Promise(r => setTimeout(r, 10));
+  const codexPc = sandbox.createdPeers[sandbox.createdPeers.length - 1];
+  assert.ok(codexPc);
+  codexPc.onicecandidate?.({candidate: {candidate: 'candidate:1 1 UDP 123 1.2.3.4 9999 typ srflx', type: 'srflx'}});
+  const sdp = await connectPromise;
+  const elapsed = Date.now() - startedAt;
+
+  assert.ok(sdp.includes('m=audio'));
+  assert.ok(elapsed < 220, `Expected srflx ICE gathering timer (~80ms) to finish well under 220ms, got ${elapsed}ms`);
+  assert.equal(sandbox.createdDelays.length, 2);
+  assert.equal(sandbox.createdDelays[0].delayTime.value, 0.10);
+  assert.equal(sandbox.createdDelays[1].delayTime.value, 0.015);
+  sandbox.api.codexDisconnect();
+});
+
+test('meet-media.cjs codexWaitUserSpeech uses 40ms poll, 350ms default silence, and returns speechEndedAtMs and silenceWaitMs', async () => {
+  let frame = 0;
+  const sandbox = createMediaSandbox({
+    sampleProvider: () => {
+      frame++;
+      // Frames 1..3: speech (0.04); Frames 4+: silence (0.0003)
+      const val = frame <= 3 ? 0.04 : 0.0003;
+      return new Float32Array(256).fill(val);
+    },
+  });
+
+  await sandbox.api.codexConnect();
+  const startedAt = Date.now();
+  // Use default silenceMs (350ms -> 9 ticks at 40ms = ~360ms after 3 speech ticks = ~480ms total)
+  const res = await sandbox.api.codexWaitUserSpeech(2000, 3000);
+  const finishedAt = Date.now();
+
+  assert.equal(res.spoke, true);
+  assert.equal(res.aborted, false);
+  assert.ok(res.speechEndedAtMs >= startedAt && res.speechEndedAtMs <= finishedAt);
+  assert.ok(res.silenceWaitMs >= 280 && res.silenceWaitMs <= 650, `Expected silenceWaitMs ~350ms, got ${res.silenceWaitMs}ms`);
+  assert.ok(finishedAt - startedAt < 850, `Expected 40ms poll + 350ms default silence to finish under 850ms, got ${finishedAt - startedAt}ms`);
+  sandbox.api.codexDisconnect();
+});
+
+test('meet-media.cjs codexRecordWakePcm downsamples 48kHz to 16kHz Int16le PCM and retains ~200ms pre-roll', async () => {
+  let chunkIdx = 0;
+  const sandbox = createMediaSandbox({
+    scriptProcessorIntervalMs: 10,
+    sampleProvider: () => {
+      chunkIdx++;
+      // Chunks 1..2: quiet pre-roll with known non-zero marker value 0.002 (below onset threshold 0.0055)
+      if (chunkIdx <= 2) return new Float32Array(2048).fill(0.002);
+      // Chunks 3..6: speech at 0.25 (4 voiced chunks >= 3)
+      if (chunkIdx <= 6) return new Float32Array(2048).fill(0.25);
+      // Chunks 7+: silence
+      return new Float32Array(2048).fill(0.0002);
+    },
+  });
+
+  const res = await sandbox.api.codexRecordWakePcm(4000, 4000, 180);
+  assert.ok(res, 'Expected non-null PCM result');
+  assert.equal(res.sampleRate, 16000);
+  assert.ok(typeof res.pcmBase64 === 'string' && res.pcmBase64.length > 0);
+  assert.ok(typeof res.speechEndedAtMs === 'number' && res.speechEndedAtMs > 0);
+  assert.ok(typeof res.silenceWaitMs === 'number' && res.silenceWaitMs >= 0);
+  assert.ok(res.durationMs > 200);
+
+  const rawBytes = Buffer.from(res.pcmBase64, 'base64');
+  assert.equal(rawBytes.length % 2, 0);
+  const sampleCount = rawBytes.length / 2;
+  const int16 = new Int16Array(sampleCount);
+  for (let i = 0; i < sampleCount; i++) {
+    int16[i] = rawBytes.readInt16LE(i * 2);
+  }
+
+  // First samples come from the 2 pre-roll chunks (0.002 * 32767 ≈ 66)
+  const expectedPreRoll = Math.round(0.002 * 32767);
+  assert.equal(int16[0], expectedPreRoll);
+  // Voiced samples after the 2 pre-roll chunks (2 * 2048 / 3 = 1365 samples) must match 0.25 * 32767 = 8192
+  const expectedVoiced = Math.round(0.25 * 32767);
+  assert.equal(int16[1400], expectedVoiced);
+
+  // Verify ScriptProcessorNode was cleanly disconnected in finally
+  assert.equal(sandbox.createdScriptProcessors.length, 1);
+  assert.equal(sandbox.createdScriptProcessors[0].disconnected, true);
+});
+
+test('meet-media.cjs codexRecordWakePcm aborts early on click false-start and resolves null', async () => {
+  let chunkIdx = 0;
+  const sandbox = createMediaSandbox({
+    scriptProcessorIntervalMs: 10,
+    sampleProvider: () => {
+      chunkIdx++;
+      // Chunks 1..2: brief click spike (0.03), then quiet background (0.0003)
+      return new Float32Array(2048).fill(chunkIdx <= 2 ? 0.03 : 0.0003);
+    },
+  });
+
+  const res = await sandbox.api.codexRecordWakePcm(8000, 12000, 450);
+  assert.equal(res, null);
+  assert.ok(chunkIdx <= 10, `Expected early click abort within ~6 chunks, got ${chunkIdx}`);
+  assert.equal(sandbox.createdScriptProcessors[0].disconnected, true);
+});
+
+test('meet-media.cjs codexRecordWakePcm respects window.__nailAbortRecord() cancellation', async () => {
+  const sandbox = createMediaSandbox({
+    scriptProcessorIntervalMs: 15,
+    sampleProvider: () => new Float32Array(2048).fill(0.0003),
+  });
+
+  const promise = sandbox.api.codexRecordWakePcm(8000, 12000, 450);
+  await new Promise(r => setTimeout(r, 35));
+  assert.equal(typeof sandbox.windowObj.__nailAbortRecord, 'function');
+  sandbox.windowObj.__nailAbortRecord();
+  const res = await promise;
+  assert.equal(res, null);
+  assert.equal(sandbox.createdScriptProcessors[0].disconnected, true);
+});
+
+test('meet-media.cjs codexRecordWakePcm falls back to record() when createScriptProcessor is unavailable', async () => {
+  let chunkIdx = 0;
+  const sandbox = createMediaSandbox({
+    enableScriptProcessor: false,
+    sampleProvider: () => {
+      chunkIdx++;
+      return new Float32Array(256).fill(chunkIdx <= 2 ? 0.03 : 0.0004);
+    },
+  });
+
+  const res = await sandbox.api.codexRecordWakePcm(8000, 12000, 450);
+  assert.equal(res, '');
+  assert.equal(sandbox.createdScriptProcessors.length, 0);
+});
+
+test('meet-media.cjs codexCloseOut({keepTeamsSenders: true}) keeps Teams virtual senders until restoreTeamsSenders()', async () => {
+  const sandbox = createMediaSandbox({
+    hostname: 'teams.microsoft.com',
+    sampleProvider: () => new Float32Array(256).fill(0),
+  });
+
+  const origTrack = sandbox.makeFakeTrack('teams-orig-mic');
+  const sender = {
+    track: origTrack,
+    async replaceTrack(next) {
+      this.track = next;
+    },
+  };
+  sandbox.meetPc._senders.push(sender);
+
+  await sandbox.api.codexConnect();
+  await sandbox.api.codexOpenOut();
+  assert.notEqual(sender.track, origTrack, 'Expected Teams sender track to be replaced with virtual track');
+  let diag = await sandbox.api.micOutDiag();
+  assert.equal(diag.outGain, 1);
+  assert.equal(diag.replacedActive, 1);
+
+  await sandbox.api.codexCloseOut({keepTeamsSenders: true});
+  diag = await sandbox.api.micOutDiag();
+  assert.equal(diag.outGain, 0);
+  assert.equal(diag.replacedActive, 1, 'Expected Teams virtual sender to remain active when keepTeamsSenders is true');
+  assert.notEqual(sender.track, origTrack);
+
+  await sandbox.api.restoreTeamsSenders();
+  diag = await sandbox.api.micOutDiag();
+  assert.equal(diag.replacedActive, 0);
+  assert.equal(sender.track, origTrack, 'Expected restoreTeamsSenders() to restore original Teams track');
+
+  // Verify default codexCloseOut() restores Teams senders automatically
+  await sandbox.api.codexOpenOut();
+  assert.notEqual(sender.track, origTrack);
+  await sandbox.api.codexCloseOut();
+  assert.equal(sender.track, origTrack);
+  sandbox.api.codexDisconnect();
 });

@@ -1083,6 +1083,277 @@ function installMedia(enableAvatar = false) {
         for (const source of sources) source.disconnect();
       }
     },
+    async codexRecordWakePcm(maxSpeakMs = 8000, idleWaitMs = 12000, silenceMs = 450) {
+      await start();
+      if (context.state === 'suspended') await context.resume().catch(() => {});
+      if (maxSpeakMs <= 0) throw new Error('Invalid capture duration');
+      if (typeof context.createScriptProcessor !== 'function') {
+        return window.__nailMedia.record(Math.min(maxSpeakMs, 12000), true, idleWaitMs, false);
+      }
+      const sources = [];
+      const attachedTracks = new Set();
+      let onTrackAttach = null;
+      let processorNode = null;
+      try {
+        const bus = context.createGain();
+        bus.gain.value = 1;
+        processorNode = context.createScriptProcessor(2048, 1, 1);
+        const sink = context.createGain();
+        sink.gain.value = 0;
+        bus.connect(processorNode);
+        processorNode.connect(sink);
+        if (context.destination) {
+          try { sink.connect(context.destination); } catch {}
+        }
+        sources.push(bus, processorNode, sink);
+        const attachRemoteTrack = track => {
+          if (!track || track.kind !== 'audio' || track.readyState !== 'live' || attachedTracks.has(track)) return;
+          try {
+            const source = context.createMediaStreamSource(new MediaStream([track]));
+            source.connect(bus);
+            sources.push(source);
+            attachedTracks.add(track);
+          } catch {}
+        };
+        onTrackAttach = attachRemoteTrack;
+        activeRecordTrackAttach.add(onTrackAttach);
+        for (const track of remote.keys()) attachRemoteTrack(track);
+        window.__nailDiagnostics = {
+          tracks: remote.size,
+          live: attachedTracks.size,
+          muted: [...remote.keys()].filter(t => t.muted).length,
+        };
+        if (!attachedTracks.size) return null;
+
+        const srcRate = context.sampleRate || 48000;
+        const targetRate = 16000;
+        const ratio = srcRate / targetRate;
+        const bufferSize = processorNode.bufferSize || 2048;
+        const frameMs = Math.max(10, (bufferSize / srcRate) * 1000);
+        const maxIdleTicks = Math.max(1, Math.ceil(idleWaitMs / frameMs));
+        const maxSpeechTicks = Math.max(1, Math.ceil(maxSpeakMs / frameMs));
+        const requiredSilentTicks = Math.max(2, Math.ceil(silenceMs / frameMs));
+        const earlyAbortSilentTicks = Math.max(3, Math.ceil(160 / frameMs));
+        const maxPreRollSamples = Math.round(targetRate * 0.2);
+        const maxPcmBytes = 1024 * 1024;
+        const maxPcmSamples = maxPcmBytes >> 1;
+
+        let leftover = new Float32Array(0);
+        const downsampleToInt16 = input => {
+          if (!input || !input.length) return new Int16Array(0);
+          if (srcRate === targetRate) {
+            const out = new Int16Array(input.length);
+            for (let i = 0; i < input.length; i++) {
+              const clamped = Math.max(-1, Math.min(1, input[i]));
+              out[i] = clamped < 0 ? Math.round(clamped * 32768) : Math.round(clamped * 32767);
+            }
+            return out;
+          }
+          let combined = input;
+          if (leftover.length) {
+            combined = new Float32Array(leftover.length + input.length);
+            combined.set(leftover, 0);
+            combined.set(input, leftover.length);
+          }
+          const outLen = Math.floor(combined.length / ratio);
+          if (outLen <= 0) {
+            leftover = new Float32Array(combined);
+            return new Int16Array(0);
+          }
+          const out = new Int16Array(outLen);
+          for (let i = 0; i < outLen; i++) {
+            const startIdx = Math.floor(i * ratio);
+            const endIdx = Math.max(startIdx + 1, Math.floor((i + 1) * ratio));
+            let sum = 0;
+            for (let j = startIdx; j < endIdx && j < combined.length; j++) sum += combined[j];
+            const avg = sum / (endIdx - startIdx);
+            const clamped = Math.max(-1, Math.min(1, avg));
+            out[i] = clamped < 0 ? Math.round(clamped * 32768) : Math.round(clamped * 32767);
+          }
+          const consumed = Math.floor(outLen * ratio);
+          leftover = combined.slice(consumed);
+          return out;
+        };
+
+        return await new Promise(resolve => {
+          const preRollChunks = [];
+          let preRollSamples = 0;
+          const recordedChunks = [];
+          let recordedSamples = 0;
+          const waitStartedAt = Date.now();
+          let voiceStartedAt = 0;
+          let lastVoicedAt = 0;
+          let ticks = 0;
+          let speechTicks = 0;
+          let voicedTicks = 0;
+          let silentTicks = 0;
+          let onsetStreak = 0;
+          let noiseFloor = 0.003;
+          let started = false;
+          let aborted = false;
+          let settled = false;
+          let watchdog = null;
+
+          const finish = keep => {
+            if (settled) return;
+            settled = true;
+            if (watchdog) { clearInterval(watchdog); watchdog = null; }
+            if (processorNode) processorNode.onaudioprocess = null;
+            if (window.__nailAbortRecord === onAbort) window.__nailAbortRecord = null;
+            if (!keep || aborted || !started || voicedTicks < 3 || recordedSamples <= 0) {
+              resolve(null);
+              return;
+            }
+            const endedAt = Date.now();
+            const speechEndedAtMs = lastVoicedAt || endedAt;
+            const silenceWaitMs = Math.max(0, endedAt - speechEndedAtMs);
+            const totalSamples = Math.min(recordedSamples, maxPcmSamples);
+            const bytes = new Uint8Array(totalSamples * 2);
+            let byteOffset = 0;
+            for (const chunk of recordedChunks) {
+              for (let i = 0; i < chunk.length && byteOffset < bytes.length; i++) {
+                const sample = chunk[i];
+                bytes[byteOffset++] = sample & 0xff;
+                bytes[byteOffset++] = (sample >> 8) & 0xff;
+              }
+              if (byteOffset >= bytes.length) break;
+            }
+            resolve({
+              pcmBase64: audioBase64(bytes),
+              sampleRate: targetRate,
+              silenceWaitMs,
+              speechEndedAtMs,
+              durationMs: Math.round((totalSamples / targetRate) * 1000),
+            });
+          };
+
+          const onAbort = () => {
+            aborted = true;
+            finish(false);
+          };
+          window.__nailAbortRecord = onAbort;
+
+          const appendRecordedChunk = pcmChunk => {
+            if (!pcmChunk || !pcmChunk.length) return false;
+            const remaining = maxPcmSamples - recordedSamples;
+            if (remaining <= 0) return true;
+            const slice = pcmChunk.length > remaining ? pcmChunk.subarray(0, remaining) : pcmChunk;
+            recordedChunks.push(slice);
+            recordedSamples += slice.length;
+            return recordedSamples >= maxPcmSamples;
+          };
+
+          watchdog = setInterval(() => {
+            const now = Date.now();
+            if (!started && now - waitStartedAt >= idleWaitMs) {
+              finish(false);
+            } else if (started && voiceStartedAt && now - voiceStartedAt >= maxSpeakMs) {
+              finish(true);
+            }
+          }, 100);
+
+          processorNode.onaudioprocess = ev => {
+            if (settled) return;
+            const input = ev?.inputBuffer?.getChannelData?.(0);
+            if (!input || !input.length) return;
+            ticks++;
+            if (voicedTicks > 0) speechTicks++;
+            window.__nailDiagnostics = {
+              tracks: remote.size,
+              live: attachedTracks.size,
+              muted: [...remote.keys()].filter(t => t.muted).length,
+            };
+            let sum = 0;
+            for (let i = 0; i < input.length; i++) sum += input[i] * input[i];
+            const rms = Math.sqrt(sum / input.length);
+            const now = Date.now();
+            const inEchoGuard = now - lastPlayEndedAt < 450;
+            const startThreshold = Math.max(0.0055, noiseFloor * 1.8);
+            const sustainThreshold = Math.max(0.004, noiseFloor * 1.45);
+            const pcmChunk = downsampleToInt16(input);
+
+            if (!started) {
+              if (!inEchoGuard && rms >= startThreshold) {
+                onsetStreak++;
+                if (onsetStreak >= 2 || rms >= 0.015) {
+                  started = true;
+                  voiceStartedAt = now;
+                  lastVoicedAt = now;
+                  ticks = 0;
+                  speechTicks = 1;
+                  voicedTicks = onsetStreak;
+                  silentTicks = 0;
+                  for (const prior of preRollChunks) {
+                    if (appendRecordedChunk(prior)) { finish(true); return; }
+                  }
+                  preRollChunks.length = 0;
+                  preRollSamples = 0;
+                  if (appendRecordedChunk(pcmChunk)) { finish(true); return; }
+                  return;
+                }
+              } else {
+                onsetStreak = 0;
+                noiseFloor = Math.min(0.004, Math.max(0.002, noiseFloor * 0.9 + rms * 0.1));
+              }
+              if (pcmChunk.length) {
+                preRollChunks.push(pcmChunk);
+                preRollSamples += pcmChunk.length;
+                while (preRollSamples > maxPreRollSamples && preRollChunks.length > 0) {
+                  const extra = preRollSamples - maxPreRollSamples;
+                  if (preRollChunks[0].length <= extra) {
+                    preRollSamples -= preRollChunks[0].length;
+                    preRollChunks.shift();
+                  } else {
+                    preRollChunks[0] = preRollChunks[0].subarray(extra);
+                    preRollSamples -= extra;
+                  }
+                }
+              }
+              if (ticks >= maxIdleTicks || now - waitStartedAt >= idleWaitMs) {
+                finish(false);
+              }
+              return;
+            }
+
+            if (appendRecordedChunk(pcmChunk)) {
+              if (rms >= sustainThreshold) {
+                voicedTicks++;
+                lastVoicedAt = now;
+              }
+              finish(true);
+              return;
+            }
+
+            if (rms >= sustainThreshold) {
+              voicedTicks++;
+              silentTicks = 0;
+              lastVoicedAt = now;
+            } else {
+              silentTicks++;
+              if (voicedTicks < 3 && silentTicks >= earlyAbortSilentTicks) {
+                aborted = true;
+                finish(false);
+                return;
+              }
+              if (voicedTicks >= 3 && silentTicks >= requiredSilentTicks) {
+                finish(true);
+                return;
+              }
+            }
+
+            if (speechTicks >= maxSpeechTicks || (voiceStartedAt && now - voiceStartedAt >= maxSpeakMs)) {
+              finish(true);
+            }
+          };
+        });
+      } finally {
+        if (onTrackAttach) activeRecordTrackAttach.delete(onTrackAttach);
+        if (processorNode) processorNode.onaudioprocess = null;
+        for (const source of sources) {
+          try { source.disconnect(); } catch {}
+        }
+      }
+    },
     async play(encoded) {
       await start();
       if (context.state === 'suspended') await context.resume().catch(() => {});
@@ -1130,7 +1401,7 @@ function installMedia(enableAvatar = false) {
       for (const track of remote.keys()) attachTrackToCodexBus(track);
 
       const inPreRoll = context.createDelay(1.0);
-      inPreRoll.delayTime.value = 0.25;
+      inPreRoll.delayTime.value = 0.10;
       const inGain = context.createGain();
       inGain.gain.value = 0;
       const inDest = context.createMediaStreamDestination();
@@ -1144,7 +1415,7 @@ function installMedia(enableAvatar = false) {
       const outMeter = context.createAnalyser();
       outMeter.fftSize = 1024;
       const outDelay = context.createDelay(1.0);
-      outDelay.delayTime.value = 0.06;
+      outDelay.delayTime.value = 0.015;
       const outGain = context.createGain();
       outGain.gain.value = 0;
       outDelay.connect(outGain);
@@ -1205,13 +1476,13 @@ function installMedia(enableAvatar = false) {
           pc.onicecandidate = null;
           resolve();
         };
-        const hardTimer = setTimeout(finish, 1200);
+        const hardTimer = setTimeout(finish, 800);
         pc.onicegatheringstatechange = () => { if (pc.iceGatheringState === 'complete') finish(); };
         pc.onicecandidate = ev => {
           if (!ev.candidate) { finish(); return; }
           const cand = ev.candidate.candidate || '';
           if (!srflxTimer && (ev.candidate.type === 'srflx' || ev.candidate.type === 'relay' || /\btyp (srflx|relay)\b/.test(cand))) {
-            srflxTimer = setTimeout(finish, 150);
+            srflxTimer = setTimeout(finish, 80);
           }
         };
       });
@@ -1221,16 +1492,17 @@ function installMedia(enableAvatar = false) {
       if (!codexBridge?.pc) throw new Error('voice-codex-connection');
       await codexBridge.pc.setRemoteDescription({type: 'answer', sdp});
     },
-    async codexWaitUserSpeech(maxWaitMs = 8000, maxSpeakMs = 12000, silenceMs = 720) {
+    async codexWaitUserSpeech(maxWaitMs = 8000, maxSpeakMs = 12000, silenceMs = 350) {
       if (!codexBridge) throw new Error('voice-codex-connection');
       for (const track of remote.keys()) attachTrackToCodexBus(track);
       const bridge = codexBridge;
       resetCodexTurnState(true);
       bridge.inGain.gain.value = 0;
-      const requiredSilentTicks = Math.max(2, Math.ceil(silenceMs / 80));
+      const requiredSilentTicks = Math.max(2, Math.ceil(silenceMs / 40));
       return await new Promise(resolve => {
         const startedAt = Date.now();
         let voiceStartedAt = 0;
+        let lastVoicedAt = 0;
         let voicedTicks = 0;
         let silentTicks = 0;
         let onsetStreak = 0;
@@ -1247,7 +1519,18 @@ function installMedia(enableAvatar = false) {
           if (!spoke || aborted) {
             bridge.dcAcceptingTurn = false;
           }
-          resolve({spoke, aborted, peak, ms: Date.now() - startedAt, liveTracks: remote.size});
+          const endedAt = Date.now();
+          const speechEndedAtMs = lastVoicedAt || endedAt;
+          const silenceWaitMs = Math.max(0, endedAt - speechEndedAtMs);
+          resolve({
+            spoke,
+            aborted,
+            peak,
+            ms: endedAt - startedAt,
+            silenceWaitMs,
+            speechEndedAtMs,
+            liveTracks: remote.size,
+          });
         };
         const onAbort = () => cleanup(true);
         abortCodexSpeech = onAbort;
@@ -1269,11 +1552,13 @@ function installMedia(enableAvatar = false) {
               onsetStreak++;
               if (onsetStreak >= 2 || rms >= 0.015) {
                 voiceStartedAt = now;
+                lastVoicedAt = now;
                 bridge.inGain.gain.value = 1;
                 voicedTicks = onsetStreak;
                 silentTicks = 0;
               }
             } else {
+              lastVoicedAt = now;
               voicedTicks++;
               silentTicks = 0;
             }
@@ -1296,7 +1581,7 @@ function installMedia(enableAvatar = false) {
           }
           if (voiceStartedAt && now - voiceStartedAt >= maxSpeakMs) { cleanup(false); return; }
           if (!voiceStartedAt && now - startedAt >= maxWaitMs) { cleanup(false); }
-        }, 80);
+        }, 40);
       });
     },
     codexResetTurnState: resetCodexTurnState,
@@ -1318,14 +1603,17 @@ function installMedia(enableAvatar = false) {
       await attachTeamsVirtualSenders();
       if (codexBridge) codexBridge.outGain.gain.value = 1;
     },
-    async codexCloseOut() {
+    async codexCloseOut(opts = {}) {
       if (codexBridge) {
         if (codexBridge.outGain.gain.value > 0) lastPlayEndedAt = Date.now();
         codexBridge.outGain.gain.value = 0;
         codexBridge.dcAcceptingTurn = false;
       }
-      await restoreTeamsSenders();
+      if (!opts?.keepTeamsSenders) {
+        await restoreTeamsSenders();
+      }
     },
+    restoreTeamsSenders,
     async codexState() {
       if (!codexBridge?.pc) {
         return {
