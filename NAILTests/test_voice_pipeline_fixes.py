@@ -327,6 +327,132 @@ class DaemonRequestIdCorrelationTests(unittest.TestCase):
         self.assertEqual(lines[1]["id"], 42)
         self.assertTrue(lines[1]["triggered"])
         self.assertTrue(lines[1]["has_query"])
+        self.assertIsInstance(lines[1]["whisperMs"], int)
+
+
+class TranscribeDaemonOptimizationTests(unittest.TestCase):
+    def _make_pcm_file(self, directory: pathlib.Path, name: str) -> tuple[pathlib.Path, np.ndarray]:
+        t = np.linspace(0, 1.0, 16000, endpoint=False, dtype=np.float32)
+        speech = (0.05 * np.sin(2 * np.pi * 220 * t)).astype(np.float32)
+        int16_pcm = (speech * 32768.0).astype("<i2")
+        pcm_path = directory / name
+        pcm_path.write_bytes(int16_pcm.tobytes())
+        expected = int16_pcm.astype(np.float32) / 32768.0
+        return pcm_path, expected
+
+    def test_pcm16k_format_and_suffix_skip_ffmpeg_subprocess(self):
+        import tempfile
+
+        recorded_audio = []
+        recorded_beams = []
+
+        class _RecordingModel:
+            def transcribe(self, audio, **kwargs):
+                recorded_audio.append(audio)
+                recorded_beams.append(kwargs.get("beam_size"))
+                return [_FakeSegment("Halo Nail, cek suara.", no_speech_prob=0.04, avg_logprob=-0.2)], None
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = pathlib.Path(tmpdir)
+            raw_no_ext, expected_fmt = self._make_pcm_file(tmp, "chunk.raw")
+            pcm_ext, expected_ext = self._make_pcm_file(tmp, "chunk.pcm")
+
+            stdin_data = "\n".join([
+                json.dumps({"id": 1, "audio": str(raw_no_ext), "mode": "wake", "format": "pcm16k"}),
+                json.dumps({"id": 2, "audio": str(pcm_ext), "mode": "wake-preview"}),
+                "",
+            ])
+            fake_stdout = io.StringIO()
+            with patch.object(pipeline.subprocess, "run", side_effect=AssertionError("ffmpeg must not be called")), \
+                 patch.object(pipeline, "decode_pcm16k", side_effect=AssertionError("decode_pcm16k must not be called")), \
+                 patch.object(pipeline.sys, "stdin", io.StringIO(stdin_data)), \
+                 patch.object(pipeline.sys, "stdout", fake_stdout):
+                rc = pipeline._transcribe_daemon(_RecordingModel(), None, 1)
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(recorded_audio), 2)
+        np.testing.assert_allclose(recorded_audio[0], expected_fmt, atol=1e-6)
+        np.testing.assert_allclose(recorded_audio[1], expected_ext, atol=1e-6)
+        self.assertEqual(recorded_beams, [1, 1])
+
+        lines = [json.loads(line) for line in fake_stdout.getvalue().strip().splitlines()]
+        self.assertEqual(len(lines), 3)
+        self.assertEqual(lines[1]["id"], 1)
+        self.assertEqual(lines[2]["id"], 2)
+        self.assertIsInstance(lines[1]["whisperMs"], int)
+        self.assertIsInstance(lines[2]["whisperMs"], int)
+
+    def test_beam_size_by_mode_and_whisper_ms_in_all_responses(self):
+        import tempfile
+
+        recorded_beams = []
+
+        class _BeamModel:
+            def transcribe(self, audio, **kwargs):
+                recorded_beams.append(kwargs.get("beam_size"))
+                return [_FakeSegment("Halo Nail, catat rapat ini.", no_speech_prob=0.04, avg_logprob=-0.2)], None
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = pathlib.Path(tmpdir)
+            pcm_path, _ = self._make_pcm_file(tmp, "sample.pcm")
+            silence_path = tmp / "silence.pcm"
+            silence_path.write_bytes(np.zeros(16000, dtype="<i2").tobytes())
+
+            stdin_data = "\n".join([
+                json.dumps({"id": 10, "audio": str(pcm_path), "mode": "wake"}),
+                json.dumps({"id": 11, "audio": str(pcm_path), "mode": "wake-preview"}),
+                json.dumps({"id": 12, "audio": str(pcm_path), "mode": "preview"}),
+                json.dumps({"id": 13, "audio": str(pcm_path), "mode": "transcript"}),
+                json.dumps({"id": 14, "audio": str(silence_path), "mode": "wake"}),
+                json.dumps({"id": 15, "audio": "relative/path.pcm", "mode": "wake"}),
+                "",
+            ])
+            fake_stdout = io.StringIO()
+            with patch.object(pipeline.sys, "stdin", io.StringIO(stdin_data)), \
+                 patch.object(pipeline.sys, "stdout", fake_stdout):
+                rc = pipeline._transcribe_daemon(_BeamModel(), None, 1)
+
+        self.assertEqual(rc, 0)
+        # wake, wake-preview, preview -> beam_size=1; transcript -> beam_size=5
+        self.assertEqual(recorded_beams, [1, 1, 1, 5])
+
+        lines = [json.loads(line) for line in fake_stdout.getvalue().strip().splitlines()]
+        self.assertEqual(len(lines), 7)
+        for resp in lines[1:]:
+            self.assertIn("whisperMs", resp)
+            self.assertIsInstance(resp["whisperMs"], int)
+            self.assertGreaterEqual(resp["whisperMs"], 0)
+        self.assertEqual(lines[5]["id"], 14)
+        self.assertFalse(lines[5]["triggered"])
+        self.assertEqual(lines[6]["id"], 15)
+        self.assertIn("error", lines[6])
+
+    def test_low_priority_flag_calls_os_nice_safely(self):
+        with patch.object(pipeline.sys, "argv", ["agy-voice.py", "--transcribe-daemon", "--low-priority"]), \
+             patch.object(pipeline.os, "nice") as nice_mock, \
+             patch.object(pipeline, "WhisperModel", return_value=Mock()), \
+             patch.object(pipeline, "_transcribe_daemon", return_value=0):
+            rc = pipeline.main()
+        self.assertEqual(rc, 0)
+        nice_mock.assert_called_once_with(10)
+
+        # os.nice failure must be swallowed safely
+        with patch.object(pipeline.sys, "argv", ["agy-voice.py", "--transcribe-daemon", "--low-priority"]), \
+             patch.object(pipeline.os, "nice", side_effect=PermissionError("not permitted")) as nice_err_mock, \
+             patch.object(pipeline, "WhisperModel", return_value=Mock()), \
+             patch.object(pipeline, "_transcribe_daemon", return_value=0):
+            rc = pipeline.main()
+        self.assertEqual(rc, 0)
+        nice_err_mock.assert_called_once_with(10)
+
+        # Without --low-priority, os.nice is not called
+        with patch.object(pipeline.sys, "argv", ["agy-voice.py", "--transcribe-daemon"]), \
+             patch.object(pipeline.os, "nice") as nice_unused_mock, \
+             patch.object(pipeline, "WhisperModel", return_value=Mock()), \
+             patch.object(pipeline, "_transcribe_daemon", return_value=0):
+            rc = pipeline.main()
+        self.assertEqual(rc, 0)
+        nice_unused_mock.assert_not_called()
 
 
 if __name__ == "__main__":

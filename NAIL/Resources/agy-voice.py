@@ -150,6 +150,15 @@ def decode_pcm16k(source: pathlib.Path, *, allow_incomplete: bool = False) -> np
     return np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
 
 
+def decode_raw_pcm16k(source: pathlib.Path) -> np.ndarray:
+    """Decode raw little-endian int16 mono 16 kHz PCM bytes without ffmpeg."""
+    pcm = source.read_bytes()
+    usable = len(pcm) - (len(pcm) % 2)
+    if usable <= 0:
+        raise RuntimeError("audio has no decodable samples")
+    return np.frombuffer(pcm[:usable], dtype="<i2").astype(np.float32) / 32768.0
+
+
 def _keep_segment(segment, *, allow_ambiguous_short: bool = False) -> bool:
     text = (getattr(segment, "text", "") or "").strip()
     if not text or is_hallucinated_text(text):
@@ -418,6 +427,7 @@ def _transcribe_daemon(whisper: WhisperModel, models: pathlib.Path | None, next_
                 continue
             speaker_failed = False
             req_id = None
+            t_start = time.monotonic()
             try:
                 req = json.loads(raw)
                 req_id = req.get("id")
@@ -425,15 +435,20 @@ def _transcribe_daemon(whisper: WhisperModel, models: pathlib.Path | None, next_
                 if not audio.is_absolute():
                     raise ValueError("audio path must be absolute")
                 mode = req.get("mode")
-                samples = decode_pcm16k(audio, allow_incomplete=mode in ("preview", "wake-preview"))
-                # Compare more candidates for finished commands while keeping previews responsive.
-                beam_size = 5 if mode in ("transcript", "wake") else 1
+                audio_format = req.get("format")
+                if audio_format == "pcm16k" or audio.suffix.lower() == ".pcm":
+                    samples = decode_raw_pcm16k(audio)
+                else:
+                    samples = decode_pcm16k(audio, allow_incomplete=mode in ("preview", "wake-preview"))
+                # Keep wake and preview paths responsive with greedy decoding; use beam_size=5 only for final transcripts.
+                beam_size = 5 if mode == "transcript" else 1
                 if mode in ("wake", "wake-preview"):
                     if has_speech_energy(samples, min_peak=0.008, min_rms=0.0018):
                         raw_heard = transcribe(whisper, samples, beam_size=beam_size)
                         out = detect_wake_utterance(raw_heard)
                     else:
                         out = {"triggered": False, "raw": "", "prompt": "", "has_query": False}
+                    out["whisperMs"] = round((time.monotonic() - t_start) * 1000)
                     if req_id is not None:
                         out["id"] = req_id
                     print(json.dumps(out, ensure_ascii=False), flush=True)
@@ -453,6 +468,7 @@ def _transcribe_daemon(whisper: WhisperModel, models: pathlib.Path | None, next_
                 out = {"entries": entries}
             except Exception as exc:
                 out = {"error": str(exc)}
+            out["whisperMs"] = round((time.monotonic() - t_start) * 1000)
             out["nextSpeaker"] = next_speaker
             if speaker_failed:
                 out["speakerLabels"] = False
@@ -1104,7 +1120,14 @@ def main() -> int:
     parser.add_argument("--elevenlabs-voice-id", default="")
     parser.add_argument("--elevenlabs-model", default=ELEVENLABS_DEFAULT_MODEL)
     parser.add_argument("--speaking-style", default="casual")
+    parser.add_argument("--low-priority", action="store_true")
     args = parser.parse_args()
+
+    if args.low_priority:
+        try:
+            os.nice(10)
+        except Exception:
+            pass
 
     if args.speak_text is not None:
         if not args.reply_wav:
