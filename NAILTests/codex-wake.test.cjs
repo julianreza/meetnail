@@ -113,6 +113,12 @@ test('CodexLiveSession.runTextTurn resets turn state, syncs notes, appends user 
   assert.equal(result.heard, 'Nail, kapan jadwal rilisnya?');
   assert.equal(result.reply, 'Siap, rilis tetap Jumat.');
   assert.equal(typeof result.latencyMs, 'number');
+  assert.equal(typeof result.timing?.notesSyncMs, 'number');
+  assert.equal(typeof result.timing?.unmuteMs, 'number');
+  assert.equal(typeof result.timing?.codexTtfbMs, 'number');
+  assert.equal(typeof result.timing?.totalTrueEndOfSpeechMs, 'number');
+  assert.equal(typeof result.timing?.trueSpeechEndedAtMs, 'number');
+  assert.equal(typeof result.timing?.firstAudioAtMs, 'number');
   assert.deepEqual(result.diag, {
     maxOutRms: 0.05,
     maxMicRms: 0.01,
@@ -353,4 +359,263 @@ test('CodexLiveSession._awaitReplyTurn resets wedged WebRTC at noTranscriptTimeo
   assert.equal(session.webrtcConnected, false);
   assert.ok(jsCalls.some(s => s.includes('codexDisconnect')));
   assert.ok(rpcCalls.some(c => c.method === 'thread/realtime/stop'));
+});
+
+test('CodexLiveSession defaults idleTimeoutMs to 600s, supports prewarmConnection, and completes dcReplyDone at 200ms', async () => {
+  const session = new CodexLiveSession();
+  assert.equal(session.idleTimeoutMs, 600_000);
+  assert.equal(session._notesSyncPromise, null);
+  assert.equal(session._lastSyncedSlideText, '');
+
+  const state = {
+    outSpoke: true,
+    delegationActive: false,
+    awaitingPostDelegation: false,
+    replyParts: ['Halo.'],
+    replyDelta: '',
+  };
+  assert.equal(CodexLiveSession.shouldCompleteTurn(state, 3, 1000, 1150, {dcReplyDone: true}), false);
+  assert.equal(CodexLiveSession.shouldCompleteTurn(state, 3, 1000, 1200, {dcReplyDone: true}), true);
+  assert.equal(CodexLiveSession.shouldCompleteTurn(state, 3, 1000, 1750, {dcReplyDone: false}), false);
+  assert.equal(CodexLiveSession.shouldCompleteTurn(state, 3, 1000, 1800, {dcReplyDone: false}), true);
+  assert.equal(CodexLiveSession.shouldCompleteTurn(state, 3, 1000, 2700, {dcReplyDone: false, serverResponseInFlight: true}), false);
+  assert.equal(CodexLiveSession.shouldCompleteTurn(state, 3, 1000, 2800, {dcReplyDone: false, serverResponseInFlight: true}), true);
+
+  let ensureCalls = 0;
+  session.ensureConnected = async () => {
+    ensureCalls++;
+    session.webrtcConnected = true;
+  };
+  const wc = {isDestroyed: () => false};
+  session.prewarmConnection(wc);
+  assert.equal(ensureCalls, 1);
+  await Promise.resolve();
+  assert.equal(session.webrtcConnected, true);
+
+  // No-op when already connected or disposed
+  session.prewarmConnection(wc);
+  assert.equal(ensureCalls, 1);
+  session.webrtcConnected = false;
+  session.disposed = true;
+  session.prewarmConnection(wc);
+  assert.equal(ensureCalls, 1);
+});
+
+test('CodexLiveSession.interrupt pre-reconnects WebRTC in the background when wasSpeaking is true', async () => {
+  const session = new CodexLiveSession();
+  const events = [];
+  const wc = {
+    isDestroyed: () => false,
+    async executeJavaScript(script) {
+      events.push(`js:${script}`);
+      return null;
+    },
+  };
+  session.activeWc = wc;
+  session.disconnectWebRTC = async targetWc => {
+    assert.equal(targetWc, wc);
+    events.push('disconnect');
+  };
+  session.ensureConnected = async targetWc => {
+    assert.equal(targetWc, wc);
+    events.push('ensureConnected');
+  };
+
+  let rejectedErr = null;
+  session.turnState = {
+    outSpoke: true,
+    rejectTurn: err => { rejectedErr = err; },
+  };
+  session.interrupt(wc);
+  assert.equal(rejectedErr?.message, 'voice-interrupted');
+  assert.equal(session.turnState.interruptedWithReconnect, true);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(events.includes('disconnect'));
+  assert.ok(events.includes('ensureConnected'));
+  assert.ok(events.indexOf('disconnect') < events.indexOf('ensureConnected'));
+
+  // When outSpoke is false, interrupt does not disconnect/reconnect
+  events.length = 0;
+  rejectedErr = null;
+  session.turnState = {
+    outSpoke: false,
+    rejectTurn: err => { rejectedErr = err; },
+  };
+  session.interrupt(wc);
+  assert.equal(rejectedErr?.message, 'voice-interrupted');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(events.includes('disconnect'), false);
+  assert.equal(events.includes('ensureConnected'), false);
+});
+
+test('CodexLiveSession.runTextTurn runs unmuteMeet in parallel with appendText, merges preTiming, and keeps follow-up mic open', async t => {
+  const session = new CodexLiveSession();
+  t.after(() => session.clearIdleTimer());
+  session.child = {};
+  session.appReady = Promise.resolve();
+  session.threadId = 'thr_parallel';
+  session.webrtcConnected = true;
+
+  const timeline = [];
+  const jsCalls = [];
+  let appendedUserText = false;
+  let pollCount = 0;
+
+  session.callRpc = async (method, params) => {
+    if (method === 'thread/realtime/appendText' && params.role === 'user') {
+      timeline.push('appendText');
+      appendedUserText = true;
+    }
+    return {};
+  };
+
+  const wc = {
+    isDestroyed: () => false,
+    async executeJavaScript(script) {
+      jsCalls.push(script);
+      if (script.includes('codexOpenOut')) timeline.push('codexOpenOut');
+      if (script.includes('codexState')) {
+        if (!appendedUserText) {
+          return {connected: true, rxPackets: 10, rxEnergy: 0.1, outRms: 0, micRms: 0, dcReply: '', dcReplyDone: false};
+        }
+        pollCount++;
+        if (pollCount === 1) {
+          return {connected: true, rxPackets: 14, rxEnergy: 0.2, outRms: 0.04, micRms: 0, dcReply: 'Jawaban cepat.', dcReplyDone: false};
+        }
+        await new Promise(resolve => setTimeout(resolve, 220));
+        return {connected: true, rxPackets: 18, rxEnergy: 0.2, outRms: 0, micRms: 0, dcReply: 'Jawaban cepat.', dcReplyDone: true};
+      }
+      return null;
+    },
+  };
+
+  const trueEndMs = Date.now() - 600;
+  const result = await session.runTextTurn(wc, {
+    text: 'Nail, apa kabar proyek?',
+    unmuteMeet: async () => {
+      timeline.push('unmute:start');
+      await new Promise(resolve => setTimeout(resolve, 60));
+      timeline.push('unmute:done');
+      return true;
+    },
+    keepFollowUpMic: true,
+    preTiming: {
+      vadSilenceMs: 450,
+      captureToWorkerMs: 6,
+      whisperMs: 140,
+      trueSpeechEndedAtMs: trueEndMs,
+    },
+  });
+
+  // appendText must fire while unmuteMeet is still in-flight, and codexOpenOut after unmute finishes
+  assert.ok(timeline.indexOf('unmute:start') < timeline.indexOf('appendText'));
+  assert.ok(timeline.indexOf('appendText') < timeline.indexOf('unmute:done'));
+  assert.ok(timeline.indexOf('unmute:done') < timeline.indexOf('codexOpenOut'));
+
+  assert.equal(result.reply, 'Jawaban cepat.');
+  assert.equal(result.timing.vadSilenceMs, 450);
+  assert.equal(result.timing.captureToWorkerMs, 6);
+  assert.equal(result.timing.whisperMs, 140);
+  assert.equal(result.timing.trueSpeechEndedAtMs, trueEndMs);
+  assert.ok(result.timing.unmuteMs >= 50);
+  assert.ok(result.timing.totalTrueEndOfSpeechMs >= 600);
+  assert.ok(jsCalls.some(s => s.includes('codexCloseOut?.({keepTeamsSenders: true})')));
+});
+
+test('CodexLiveSession.runLiveTurn supports custom wait/silence params, skipUnmute, keepFollowUpMic, and timing fields', async t => {
+  const session = new CodexLiveSession();
+  t.after(() => session.clearIdleTimer());
+  session.child = {};
+  session.appReady = Promise.resolve();
+  session.threadId = 'thr_followup';
+  session.webrtcConnected = true;
+  session.callRpc = async () => ({});
+
+  const jsCalls = [];
+  let speechDone = false;
+  let unmuteCalled = 0;
+  const trueEndMs = Date.now() - 350;
+
+  const wc = {
+    isDestroyed: () => false,
+    async executeJavaScript(script) {
+      jsCalls.push(script);
+      if (script.includes('codexWaitUserSpeech')) {
+        speechDone = true;
+        return {
+          spoke: true,
+          aborted: false,
+          peak: 0.06,
+          ms: 500,
+          silenceWaitMs: 350,
+          speechEndedAtMs: trueEndMs,
+          liveTracks: 1,
+        };
+      }
+      if (script.includes('codexState')) {
+        if (!speechDone) {
+          return {connected: true, rxPackets: 20, rxEnergy: 0.5, outRms: 0, micRms: 0, dcReply: '', dcReplyDone: false};
+        }
+        return {
+          connected: true,
+          rxPackets: 30,
+          rxEnergy: 0.8,
+          outRms: 0,
+          micRms: 0,
+          dcHeard: 'Lanjut pertanyaan kedua?',
+          dcReply: 'Siap, ini kelanjutannya.',
+          dcReplyDone: true,
+        };
+      }
+      return null;
+    },
+  };
+
+  const result = await session.runLiveTurn(wc, {
+    unmuteMeet: async () => {
+      unmuteCalled++;
+      return true;
+    },
+    maxWaitMs: 7000,
+    maxSpeakMs: 12000,
+    silenceMs: 350,
+    skipUnmute: true,
+    keepFollowUpMic: true,
+  });
+
+  assert.equal(unmuteCalled, 0);
+  assert.ok(jsCalls.some(s => s.includes('codexWaitUserSpeech(7000, 12000, 350)')));
+  assert.ok(jsCalls.some(s => s.includes('codexOpenOut')));
+  assert.ok(jsCalls.some(s => s.includes('codexCloseOut?.({keepTeamsSenders: true})')));
+  assert.equal(result.heard, 'Lanjut pertanyaan kedua?');
+  assert.equal(result.reply, 'Siap, ini kelanjutannya.');
+  assert.equal(result.timing.vadSilenceMs, 350);
+  assert.equal(result.timing.unmuteMs, 0);
+  assert.equal(result.timing.trueSpeechEndedAtMs, trueEndMs);
+  assert.ok(result.timing.totalTrueEndOfSpeechMs >= 350);
+
+  // When 7s follow-up window expires with no speech (spoke: false), codexCloseOut() is called without keepTeamsSenders
+  jsCalls.length = 0;
+  const silentWc = {
+    isDestroyed: () => false,
+    async executeJavaScript(script) {
+      jsCalls.push(script);
+      if (script.includes('codexWaitUserSpeech')) {
+        return {spoke: false, aborted: false, peak: 0, ms: 7000, silenceWaitMs: 0, speechEndedAtMs: Date.now(), liveTracks: 1};
+      }
+      if (script.includes('codexState')) {
+        return {connected: true, rxPackets: 30, rxEnergy: 0.8, outRms: 0, micRms: 0};
+      }
+      return null;
+    },
+  };
+  const silentRes = await session.runLiveTurn(silentWc, {
+    unmuteMeet: async () => true,
+    maxWaitMs: 7000,
+    silenceMs: 350,
+    skipUnmute: true,
+    keepFollowUpMic: true,
+  });
+  assert.deepEqual(silentRes, {noAudio: true});
+  assert.ok(jsCalls.some(s => s.includes('codexCloseOut?.()')));
 });
