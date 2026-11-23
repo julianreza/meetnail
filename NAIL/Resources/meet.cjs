@@ -614,6 +614,215 @@ function inspectMeet() {
   };
 }
 
+function killWorkerProcess(worker) {
+  if (!worker) return;
+  try { worker.stdin?.end(); } catch {}
+  if (process.platform !== 'win32' && worker.pid) {
+    try { process.kill(-worker.pid, 'SIGTERM'); } catch {}
+  }
+  try { worker.kill('SIGTERM'); } catch {}
+}
+
+function createAgyDaemonClient({spawnWorker = spawn, pipeline, runtimeConfig = {}, onExit = () => {}} = {}) {
+  let daemon = null;
+  let rl = null;
+  let readyPromise = null;
+  let nextId = 0;
+  let readyResolved = false;
+  let readyWaiter = null;
+  const inFlight = new Map();
+
+  function failAll(reason) {
+    const err = reason instanceof Error ? reason : new Error(String(reason || 'agy daemon exited'));
+    if (readyWaiter && !readyResolved) {
+      readyResolved = true;
+      const w = readyWaiter;
+      readyWaiter = null;
+      w.reject(err);
+    }
+    for (const entry of inFlight.values()) {
+      entry.closedError = err;
+      if (entry.waiter) {
+        const w = entry.waiter;
+        entry.waiter = null;
+        w.reject(err);
+      }
+    }
+  }
+
+  function resetState() {
+    if (rl) {
+      try { rl.close(); } catch {}
+      rl = null;
+    }
+    daemon = null;
+    readyPromise = null;
+    readyResolved = false;
+    readyWaiter = null;
+    inFlight.clear();
+  }
+
+  function start() {
+    if (daemon && readyPromise) return readyPromise;
+    const env = {...process.env, PATH: `/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/.local/bin:${process.env.PATH ?? '/usr/bin:/bin'}`};
+    const daemonArgs = ['run', '--offline', '--script', pipeline, '--daemon'];
+    if (runtimeConfig.whisperModel) daemonArgs.push('--whisper-model', String(runtimeConfig.whisperModel));
+    if (runtimeConfig.agyModel) daemonArgs.push('--agy-model', String(runtimeConfig.agyModel));
+    if (runtimeConfig.ttsVoice) daemonArgs.push('--tts-voice', String(runtimeConfig.ttsVoice));
+    if (runtimeConfig.ttsRate) daemonArgs.push('--tts-rate', String(runtimeConfig.ttsRate));
+    if (runtimeConfig.ttsEngine) daemonArgs.push('--tts-engine', String(runtimeConfig.ttsEngine));
+    if (runtimeConfig.elevenLabsVoiceId) daemonArgs.push('--elevenlabs-voice-id', String(runtimeConfig.elevenLabsVoiceId));
+    if (runtimeConfig.elevenLabsModel) daemonArgs.push('--elevenlabs-model', String(runtimeConfig.elevenLabsModel));
+    if (runtimeConfig.speakingStyle) daemonArgs.push('--speaking-style', String(runtimeConfig.speakingStyle));
+
+    const worker = spawnWorker('/opt/homebrew/bin/uv', daemonArgs, {
+      env,
+      stdio: ['pipe', 'pipe', 'ignore'],
+      detached: process.platform !== 'win32',
+    });
+    daemon = worker;
+    readyResolved = false;
+    readyPromise = new Promise((resolve, reject) => {
+      readyWaiter = {resolve, reject};
+    });
+    const iface = createInterface({input: worker.stdout, terminal: false});
+    rl = iface;
+
+    iface.on('line', line => {
+      if (daemon !== worker) return;
+      let msg;
+      try {
+        msg = JSON.parse(line);
+      } catch {
+        return;
+      }
+      if (!readyResolved) {
+        readyResolved = true;
+        const w = readyWaiter;
+        readyWaiter = null;
+        if (w) {
+          if (msg && msg.ready === false) w.reject(new Error(msg.error || 'agy daemon failed to start'));
+          else w.resolve(msg);
+        }
+        return;
+      }
+      const msgId = msg?.id;
+      const entry = msgId != null ? inFlight.get(msgId) : null;
+      if (!entry || entry.aborted) return;
+      if (entry.waiter) {
+        const w = entry.waiter;
+        entry.waiter = null;
+        w.resolve(msg);
+      } else {
+        entry.queue.push(msg);
+      }
+    });
+
+    worker.on('error', err => {
+      if (daemon !== worker) return;
+      failAll(err);
+      resetState();
+      onExit();
+    });
+
+    worker.on('exit', () => {
+      if (daemon !== worker) return;
+      failAll(new Error('agy daemon exited'));
+      resetState();
+      onExit();
+    });
+
+    worker.stdin?.on('error', err => {
+      if (daemon !== worker) return;
+      failAll(err);
+    });
+
+    return readyPromise;
+  }
+
+  function recycle() {
+    const worker = daemon;
+    failAll(new Error('agy daemon recycled'));
+    resetState();
+    killWorkerProcess(worker);
+    onExit();
+  }
+
+  async function runTurn(payload, {signal, onWake, onTranscribed} = {}) {
+    if (signal?.aborted) throw signal.reason ?? new Error('voice-interrupted');
+    await start();
+    if (signal?.aborted) throw signal.reason ?? new Error('voice-interrupted');
+    if (!daemon?.stdin?.writable) throw new Error('agy daemon exited');
+
+    const reqId = ++nextId;
+    const entry = {id: reqId, queue: [], waiter: null, aborted: false, awaitingDecision: false, closedError: null};
+    inFlight.set(reqId, entry);
+
+    const onAbort = () => {
+      entry.aborted = true;
+      if (entry.awaitingDecision && daemon?.stdin?.writable) {
+        entry.awaitingDecision = false;
+        try { daemon.stdin.write(`${JSON.stringify({id: reqId, action: 'cancel'})}\n`); } catch {}
+      }
+      if (entry.waiter) {
+        const w = entry.waiter;
+        entry.waiter = null;
+        w.reject(signal?.reason ?? new Error('voice-interrupted'));
+      }
+    };
+    signal?.addEventListener('abort', onAbort, {once: true});
+
+    const nextForReq = () => {
+      if (signal?.aborted || entry.aborted) {
+        return Promise.reject(signal?.reason ?? new Error('voice-interrupted'));
+      }
+      if (entry.queue.length) return Promise.resolve(entry.queue.shift());
+      if (entry.closedError) return Promise.reject(entry.closedError);
+      return new Promise((resolve, reject) => {
+        entry.waiter = {resolve, reject};
+      });
+    };
+
+    try {
+      daemon.stdin.write(`${JSON.stringify({...payload, id: reqId})}\n`);
+      while (true) {
+        const msg = await nextForReq();
+        if (msg.event === 'wake') {
+          await onWake?.(msg);
+          continue;
+        }
+        if (msg.event === 'transcribed') {
+          entry.awaitingDecision = true;
+          let decision;
+          try {
+            decision = (await onTranscribed?.(msg)) || {action: 'continue'};
+          } finally {
+            entry.awaitingDecision = false;
+          }
+          if (signal?.aborted || entry.aborted) {
+            try { daemon?.stdin?.writable && daemon.stdin.write(`${JSON.stringify({id: reqId, action: 'cancel'})}\n`); } catch {}
+            throw signal?.reason ?? new Error('voice-interrupted');
+          }
+          if (!daemon?.stdin?.writable) throw new Error('agy daemon exited');
+          daemon.stdin.write(`${JSON.stringify({...decision, id: reqId})}\n`);
+          continue;
+        }
+        return msg;
+      }
+    } finally {
+      signal?.removeEventListener('abort', onAbort);
+      inFlight.delete(reqId);
+    }
+  }
+
+  return {
+    ensureReady: start,
+    runTurn,
+    recycle,
+    get isRunning() { return Boolean(daemon); },
+  };
+}
+
 if (process.versions.electron) {
   const [target, profile, provider, pipeline] = process.argv.slice(2);
   const login = target === '--login';
@@ -666,14 +875,6 @@ if (process.versions.electron) {
   let stopping = false;
   let finalized = false;
   let shutdownFailsafe = null;
-  function killWorkerProcess(worker) {
-    if (!worker) return;
-    try { worker.stdin?.end(); } catch {}
-    if (process.platform !== 'win32' && worker.pid) {
-      try { process.kill(-worker.pid, 'SIGTERM'); } catch {}
-    }
-    try { worker.kill('SIGTERM'); } catch {}
-  }
   const consoleLogs = [];
   const logDir = join(homedir(), 'Library/Logs/Nail');
   const teamsLogPath = join(logDir, 'teams-debug.log');
@@ -695,7 +896,11 @@ if (process.versions.electron) {
   }
   const cancelVoice = new AbortController();
   let turnRequested = false;
+  let turnUpgraded = false;
   let turnInterrupted = false;
+  let autoVoicePhase = null;
+  let autoVoiceAbort = null;
+  let lastSpokenReply = {text: '', at: 0};
   let presentationReadingEnabled = runtimeConfig.presentationReadingEnabled === true;
   let activePresentationAbort = null;
   let followUpUntil = 0;
@@ -708,7 +913,8 @@ if (process.versions.electron) {
 
   let codexWakeWorker = null;
   let codexWakeReady = null;
-  let codexWakeNextLine = null;
+  let codexWakeRequest = null;
+  let codexWakeSeq = 0;
   let codexWakeQueue = Promise.resolve();
   let codexWakeFailed = false;
   let codexWakeUnavailableEmitted = false;
@@ -717,37 +923,48 @@ if (process.versions.electron) {
     const worker = codexWakeWorker;
     codexWakeWorker = null;
     codexWakeReady = null;
-    codexWakeNextLine = null;
+    codexWakeRequest = null;
     killWorkerProcess(worker);
   }
   function startCodexWakeDaemon() {
-    if (provider !== 'codex' || (!codexHandsFree && !presentationReadingEnabled) || codexWakeFailed || stopping) {
+    if (provider !== 'codex' || codexWakeFailed || stopping) {
       return Promise.reject(new Error('codex wake daemon unavailable'));
     }
     if (codexWakeReady) return codexWakeReady;
     const configuredModel = runtimeConfig.whisperModel || 'small';
-    const spawnWakeWorker = (modelName, allowFallback) => {
-      if (provider !== 'codex' || (!codexHandsFree && !presentationReadingEnabled) || codexWakeFailed || stopping) {
+    const spawnWakeWorker = modelName => {
+      if (stopping) {
         return Promise.reject(new Error('codex wake daemon unavailable'));
       }
       const env = {...process.env, PATH: `/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/.local/bin:${process.env.PATH ?? '/usr/bin:/bin'}`};
       const worker = spawn('/opt/homebrew/bin/uv', [
         'run', '--offline', '--script', join(__dirname, 'agy-voice.py'),
         '--transcribe-daemon', '--whisper-model', modelName,
-        '--cpu-threads', '2',
+        '--cpu-threads', '4',
       ], {env, stdio: ['pipe', 'pipe', 'ignore'], detached: process.platform !== 'win32'});
       codexWakeWorker = worker;
       const lines = createInterface({input: worker.stdout, terminal: false});
-      const responses = [];
-      const waiters = [];
+      const pending = new Map();
+      let readyResolve = null, readyReject = null;
       let exited = null;
       let booted = false;
+      const readyBoot = new Promise((resolve, reject) => {
+        readyResolve = resolve;
+        readyReject = reject;
+      });
       const rejectWaiters = error => {
         exited = error;
-        while (waiters.length) waiters.shift().reject(error);
+        if (!booted && readyReject) {
+          const r = readyReject;
+          readyResolve = null;
+          readyReject = null;
+          r(error);
+        }
+        for (const waiter of pending.values()) waiter.reject(error);
+        pending.clear();
         if (codexWakeWorker === worker) {
           codexWakeWorker = null;
-          codexWakeNextLine = null;
+          codexWakeRequest = null;
           if (booted) codexWakeReady = null;
         }
       };
@@ -755,35 +972,53 @@ if (process.versions.electron) {
       worker.on('exit', code => rejectWaiters(new Error(`codex wake daemon exited (${code})`)));
       worker.stdin.on('error', rejectWaiters);
       lines.on('line', line => {
-        const waiter = waiters.shift();
-        if (waiter) waiter.resolve(line);
-        else responses.push(line);
+        let parsed;
+        try { parsed = JSON.parse(line); } catch { return; }
+        if (!booted) {
+          booted = true;
+          const resFn = readyResolve;
+          const rejFn = readyReject;
+          readyResolve = null;
+          readyReject = null;
+          if (parsed?.ready) resFn?.(parsed);
+          else rejFn?.(new Error(parsed?.error || 'codex wake daemon failed to start'));
+          return;
+        }
+        const waiter = parsed?.id != null ? pending.get(parsed.id) : null;
+        if (!waiter) return;
+        pending.delete(parsed.id);
+        waiter.resolve(parsed);
       });
-      const nextLine = () => responses.length ? Promise.resolve(responses.shift()) :
-        exited ? Promise.reject(exited) : new Promise((resolve, reject) => waiters.push({resolve, reject}));
-      codexWakeNextLine = nextLine;
-      return nextLine().then(line => {
-        const res = JSON.parse(line);
-        if (!res.ready) throw new Error(res.error || 'codex wake daemon failed to start');
-        booted = true;
-        return res;
-      }).catch(error => {
+      codexWakeRequest = (audioPath, mode) => {
+        if (exited || !worker.stdin?.writable) return Promise.reject(exited || new Error('codex wake daemon not ready'));
+        const id = ++codexWakeSeq;
+        return new Promise((resolve, reject) => {
+          pending.set(id, {resolve, reject});
+          try {
+            worker.stdin.write(`${JSON.stringify({id, audio: audioPath, mode})}\n`);
+          } catch (err) {
+            pending.delete(id);
+            reject(err);
+          }
+        });
+      };
+      return readyBoot.catch(error => {
         if (codexWakeWorker === worker) {
           codexWakeWorker = null;
-          codexWakeNextLine = null;
+          codexWakeRequest = null;
         }
         try { worker.stdin.end(); } catch {}
         try { worker.kill(); } catch {}
-        if (allowFallback && modelName !== configuredModel && !stopping && !codexWakeFailed) {
-          return spawnWakeWorker(configuredModel, false);
+        if (modelName !== 'base' && !stopping) {
+          return spawnWakeWorker('base');
         }
         throw error;
       });
     };
-    const readyPromise = spawnWakeWorker('base', configuredModel !== 'base').catch(error => {
+    const readyPromise = spawnWakeWorker(configuredModel).catch(error => {
       codexWakeFailed = true;
       stopCodexWakeDaemon();
-      if (!codexWakeUnavailableEmitted) {
+      if (codexHandsFree && !stopping && !codexWakeUnavailableEmitted) {
         codexWakeUnavailableEmitted = true;
         emit('voice-codex-wake-unavailable');
       }
@@ -795,12 +1030,10 @@ if (process.versions.electron) {
   function checkCodexWake(audioPath, mode = 'wake') {
     const runCheck = async () => {
       await startCodexWakeDaemon();
-      if (!codexWakeWorker?.stdin?.writable || !codexWakeNextLine) {
+      if (!codexWakeRequest) {
         throw new Error('codex wake daemon not ready');
       }
-      const response = codexWakeNextLine();
-      codexWakeWorker.stdin.write(`${JSON.stringify({audio: audioPath, mode})}\n`);
-      const result = JSON.parse(await response);
+      const result = await codexWakeRequest(audioPath, mode);
       if (result.error) throw new Error(result.error);
       return result;
     };
@@ -809,35 +1042,15 @@ if (process.versions.electron) {
     return next;
   }
 
-  let agyDaemon = null;
-  let agyLines = null;
-  let agyReady = null;
   let agySyncedNoteCursor = 0;
-  function startAgyDaemon() {
-    if (provider !== 'antigravity' || agyDaemon) return;
-    const env = {...process.env, PATH: `/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/.local/bin:${process.env.PATH ?? '/usr/bin:/bin'}`};
-    const daemonArgs = ['run', '--offline', '--script', pipeline, '--daemon'];
-    if (runtimeConfig.whisperModel) daemonArgs.push('--whisper-model', String(runtimeConfig.whisperModel));
-    if (runtimeConfig.agyModel) daemonArgs.push('--agy-model', String(runtimeConfig.agyModel));
-    if (runtimeConfig.ttsVoice) daemonArgs.push('--tts-voice', String(runtimeConfig.ttsVoice));
-    if (runtimeConfig.ttsRate) daemonArgs.push('--tts-rate', String(runtimeConfig.ttsRate));
-    if (runtimeConfig.ttsEngine) daemonArgs.push('--tts-engine', String(runtimeConfig.ttsEngine));
-    if (runtimeConfig.elevenLabsVoiceId) daemonArgs.push('--elevenlabs-voice-id', String(runtimeConfig.elevenLabsVoiceId));
-    if (runtimeConfig.elevenLabsModel) daemonArgs.push('--elevenlabs-model', String(runtimeConfig.elevenLabsModel));
-    if (runtimeConfig.speakingStyle) daemonArgs.push('--speaking-style', String(runtimeConfig.speakingStyle));
-
-    agyDaemon = spawn('/opt/homebrew/bin/uv', daemonArgs, {env, stdio: ['pipe', 'pipe', 'ignore'], detached: process.platform !== 'win32'});
-    const rl = createInterface({input: agyDaemon.stdout, terminal: false});
-    const waiters = [];
-    const responses = [];
-    rl.on('line', line => { const w = waiters.shift(); if (w) w.resolve(line); else responses.push(line); });
-    agyDaemon.on('exit', () => {
-      while (waiters.length) waiters.shift().reject(new Error('agy daemon exited'));
-      agyDaemon = null; agyLines = null; agyReady = null; agySyncedNoteCursor = 0;
-    });
-    agyLines = () => responses.length ? Promise.resolve(responses.shift()) : new Promise((resolve, reject) => waiters.push({resolve, reject}));
-    agyReady = agyLines().then(line => JSON.parse(line));
-  }
+  const agyClient = provider === 'antigravity'
+    ? createAgyDaemonClient({
+        spawnWorker: spawn,
+        pipeline,
+        runtimeConfig,
+        onExit: () => { agySyncedNoteCursor = 0; },
+      })
+    : null;
 
   let meetingJoined = false;
   let notesTask = null;
@@ -1073,15 +1286,34 @@ if (process.versions.electron) {
       if (provider === 'codex') {
         activeCodexWakeAbort?.abort();
         activeWc?.executeJavaScript('window.__nailAbortRecord?.()').catch(() => {});
+      } else if (autoVoicePhase === 'processing' && autoVoiceAbort) {
+        autoVoiceAbort.abort(new Error('manual-preempt'));
+        agyClient?.recycle();
       } else {
-        activeWc?.executeJavaScript('window.__nailUpgradeRecord?.()').catch(() => {});
+        activeWc?.executeJavaScript('window.__nailUpgradeRecord?.()').then(upgraded => {
+          if (upgraded) {
+            if (autoVoicePhase === 'recording') {
+              turnUpgraded = true;
+              turnRequested = false;
+              emit('voice-recording');
+            }
+          } else if (turnRequested && autoVoicePhase === 'processing' && autoVoiceAbort) {
+            autoVoiceAbort.abort(new Error('manual-preempt'));
+            agyClient?.recycle();
+          }
+        }).catch(() => {});
       }
     } else if (line === 'interrupt') {
+      turnRequested = false;
+      turnUpgraded = false;
       turnInterrupted = true;
       followUpUntil = 0;
+      lastSpokenReply = {text: '', at: 0};
       activeCodexWakeAbort?.abort();
+      autoVoiceAbort?.abort(new Error('voice-interrupted'));
       activeTurnAbort?.abort(new Error('voice-interrupted'));
       activePresentationAbort?.abort();
+      if (provider === 'antigravity' && agyClient?.isRunning) agyClient.recycle();
       codexSession?.interrupt(activeWc);
       activeWc?.executeJavaScript('window.__nailMedia?.stopPlay?.(); window.__nailAbortRecord?.()').catch(() => {});
       emit('voice-interrupted');
@@ -1118,10 +1350,7 @@ if (process.versions.electron) {
     activeWc?.executeJavaScript('window.__nailMedia?.stopPlay?.(); window.__nailAbortRecord?.()').catch(() => {});
     stopCodexWakeDaemon();
     stopNotesWorker();
-    if (agyDaemon) {
-      killWorkerProcess(agyDaemon);
-      agyDaemon = null;
-    }
+    agyClient?.recycle();
     if (login) {
       finalizeAndExit('left', 0);
       return;
@@ -1351,12 +1580,14 @@ if (process.versions.electron) {
       }
     }
     const deadline = Date.now() + (platform === 'teams' ? 4500 : 2500);
-    while (!stopping && !turnInterrupted && !signal?.aborted &&
-        Date.now() < deadline && !await wc.executeJavaScript('__nailMedia.sending()')) {
-      await delay(100);
+    let isSending = false;
+    while (!stopping && !turnInterrupted && !signal?.aborted && Date.now() < deadline) {
+      isSending = Boolean(await wc.executeJavaScript('__nailMedia.sending()'));
+      if (isSending) break;
+      await delay(30);
     }
     if (stopping || turnInterrupted || signal?.aborted) return false;
-    if (await wc.executeJavaScript('__nailMedia.sending()')) {
+    if (isSending) {
       if (platform === 'teams') {
         if (state.restoreMute) {
           await delay(250);
@@ -1432,7 +1663,7 @@ if (process.versions.electron) {
         latencyMs: result.latencyMs,
       })}`);
       emit('voice-standby');
-      await delay(450);
+      await delay(250);
     } catch (error) {
       if (error?.message === 'voice-interrupted' || error?.name === 'AbortError' || stopping || turnInterrupted) return;
       await logVoiceError(error);
@@ -1479,16 +1710,18 @@ if (process.versions.electron) {
 
   async function runCodexHandsFreeTurn(wc, read, click) {
     if (!turnRequested && !stopping) emit('voice-standby');
-    const clip = await wc.executeJavaScript('__nailMedia.record(8000, true, 12000)', true);
-    if (!clip || stopping || turnInterrupted || turnRequested) return;
-    if (typeof clip !== 'string' || clip.length > 512_000) return;
-
     const work = await mkdtemp(join(tmpdir(), 'nail-wake-'));
     const input = join(work, 'wake.webm');
     const wakeAbort = new AbortController();
     activeCodexWakeAbort = wakeAbort;
     let wake = null;
     try {
+      const clip = await recordCodexQuestion(wc, work, true);
+      if (typeof clip !== 'string' || !clip || clip.length > 512_000 ||
+          stopping || turnInterrupted || turnRequested || wakeAbort.signal.aborted) {
+        await rm(work, {recursive: true, force: true}).catch(() => {});
+        return;
+      }
       await writeFile(input, Buffer.from(clip, 'base64'), {mode: 0o600});
       if (stopping || turnInterrupted || turnRequested || wakeAbort.signal.aborted) {
         await rm(work, {recursive: true, force: true}).catch(() => {});
@@ -1531,20 +1764,59 @@ if (process.versions.electron) {
     }
   }
 
-  async function runCodexManualPresentationTurn(wc, read, click) {
-    emit('voice-recording');
-    const clip = await wc.executeJavaScript('__nailMedia.record(8000, false, 12000)', true);
-    if (!clip || stopping || turnInterrupted) return;
-    if (typeof clip !== 'string' || clip.length > 512_000) throw new Error('Invalid audio');
+  function transcriptQuestion(transcript) {
+    return (transcript.entries || []).map(entry => entry.text).filter(Boolean).join(' ').trim();
+  }
+
+  async function recordCodexQuestion(wc, work, handsFree = false) {
+    const previewPath = join(work, 'preview.webm');
+    const interrupted = () => stopping || turnInterrupted || turnRequested;
+    let recording = true;
+    let pending = null;
+    let lastText = '';
+    const timer = setInterval(() => {
+      if (pending || interrupted()) return;
+      pending = (async () => {
+        const clip = await wc.executeJavaScript('__nailMedia.recordingPreview()', true);
+        if (!recording || interrupted() || typeof clip !== 'string' || !clip || clip.length > 512_000) return;
+        await writeFile(previewPath, Buffer.from(clip, 'base64'), {mode: 0o600});
+        if (!recording || interrupted()) return;
+        const transcript = await checkCodexWake(previewPath, handsFree ? 'wake-preview' : 'preview');
+        const heard = handsFree ? transcript.prompt : transcriptQuestion(transcript);
+        if (recording && !interrupted() && heard && heard !== lastText) {
+          lastText = heard;
+          emit(`voice-preview ${JSON.stringify({heard})}`);
+        }
+      })().catch(() => {}).finally(() => { pending = null; });
+    }, 250);
+    try {
+      const capture = handsFree
+        ? '__nailMedia.record(8000, true, 12000, true)'
+        : '__nailMedia.record(12000, false, 8000, true)';
+      return await wc.executeJavaScript(capture, true);
+    } finally {
+      recording = false;
+      clearInterval(timer);
+      await pending;
+    }
+  }
+
+  async function runCodexManualTurn(wc, read, click) {
     const work = await mkdtemp(join(tmpdir(), 'nail-manual-'));
     const input = join(work, 'question.webm');
     try {
+      emit('voice-recording');
+      const clip = await recordCodexQuestion(wc, work);
+      if (stopping || turnInterrupted || turnRequested) return;
+      if (!clip) { emit('voice-no-audio'); return; }
+      if (typeof clip !== 'string' || clip.length > 512_000) throw new Error('Invalid audio');
       await writeFile(input, Buffer.from(clip, 'base64'), {mode: 0o600});
       emit('voice-processing');
       const transcript = await checkCodexWake(input, 'transcript');
-      if (stopping || turnInterrupted) return;
-      const question = (transcript.entries || []).map(entry => entry.text).filter(Boolean).join(' ').trim();
+      if (stopping || turnInterrupted || turnRequested) return;
+      const question = transcriptQuestion(transcript);
       if (!question) { emit('voice-no-audio'); return; }
+      emit(`voice-preview ${JSON.stringify({heard: question})}`);
       if (shouldReadPresentation(platform, presentationReadingEnabled, question)) {
         await runCodexPresentationTurn(wc, read, click, question);
       } else {
@@ -1557,29 +1829,52 @@ if (process.versions.electron) {
 
   async function voiceTurn(wc, read, click, auto = false, isFollowUp = false) {
     if (provider === 'codex' && codexSession) {
-      if (!auto) {
-        if (platform === 'meet' && presentationReadingEnabled) return await runCodexManualPresentationTurn(wc, read, click);
-        return await runCodexLiveTurn(wc, read, click);
+      try {
+        if (!auto) {
+          if (platform === 'meet' && presentationReadingEnabled) {
+            const canTranscribe = await startCodexWakeDaemon().then(() => true, () => false);
+            if (stopping || turnInterrupted || turnRequested) return;
+            if (canTranscribe && presentationReadingEnabled) return await runCodexManualTurn(wc, read, click);
+          }
+          return await runCodexLiveTurn(wc, read, click);
+        }
+        if (codexHandsFree && !codexWakeFailed) return await runCodexHandsFreeTurn(wc, read, click);
+      } finally {
+        emit('voice-preview-end');
       }
-      if (codexHandsFree && !codexWakeFailed) return await runCodexHandsFreeTurn(wc, read, click);
       return;
     }
     const work = await mkdtemp(join(tmpdir(), 'nail-meet-'));
     const input = join(work, 'meeting.webm');
     const output = join(work, 'reply.wav');
     const micState = {restoreMute: false};
+    const turnAbort = new AbortController();
+    const onStop = () => turnAbort.abort(cancelVoice.signal.reason ?? new Error('voice-interrupted'));
+    if (cancelVoice.signal.aborted) onStop();
+    else cancelVoice.signal.addEventListener('abort', onStop, {once: true});
+    activeTurnAbort = turnAbort;
+    autoVoicePhase = auto ? 'recording' : null;
+    autoVoiceAbort = auto ? turnAbort : null;
     turnInterrupted = false;
+    turnUpgraded = false;
     try {
       emit(isFollowUp ? 'voice-followup' : auto ? 'voice-standby' : 'voice-recording');
       const idleMs = isFollowUp ? 3000 : 12000;
       const clip = await wc.executeJavaScript(`__nailMedia.record(8000, ${Boolean(auto)}, ${idleMs})`, true);
-      if (stopping || turnInterrupted) return;
-      const manual = !auto || turnRequested;
-      if (turnRequested) turnRequested = false;
-      const diag = await wc.executeJavaScript('window.__nailDiagnostics ?? null', true);
+      if (stopping || turnInterrupted || turnAbort.signal.aborted) return;
+      const manual = !auto || turnUpgraded;
+      turnUpgraded = false;
+      if (manual) {
+        autoVoicePhase = null;
+        autoVoiceAbort = null;
+      } else {
+        autoVoicePhase = 'processing';
+      }
+      const readDiag = () => wc.executeJavaScript('window.__nailDiagnostics ?? null', true).catch(() => null);
       if (!clip) {
         if (isFollowUp) followUpUntil = 0;
         if (!manual) return;
+        const diag = await readDiag();
         try {
           const dir = join(require('node:os').homedir(), 'Library/Logs/Nail');
           mkdirSync(dir, {recursive: true});
@@ -1599,49 +1894,52 @@ if (process.versions.electron) {
       const wantNotulen = listeningMode === 'notulen';
       if (provider === 'antigravity') {
         await writeFile(input, Buffer.from(clip, 'base64'), {mode: 0o600});
-        startAgyDaemon();
-        await agyReady;
+        await agyClient.ensureReady();
+        if (stopping || turnInterrupted || turnAbort.signal.aborted) return;
         const notesPayload = agySyncedNoteCursor === 0
           ? {text: meetingNotes.buildSnapshot(8000), nextCursor: meetingNotes.latestCursor()}
           : meetingNotes.drainDelta(agySyncedNoteCursor, 4000, {excludeKinds: ['command', 'reply']});
-        agyDaemon.stdin.write(`${JSON.stringify({
+        const recentReply = lastSpokenReply.text && Date.now() - lastSpokenReply.at < 8000 ? lastSpokenReply.text : '';
+        result = await agyClient.runTurn({
           from_wav: input,
           reply_wav: output,
           require_wake: requireWake,
+          is_follow_up: Boolean(isFollowUp && !manual),
+          recent_reply: recentReply,
           notulen: wantNotulen,
           notes_context: notesPayload.text,
           defer_reply: platform === 'meet' && presentationReadingEnabled,
-        })}\n`);
-        let msg = JSON.parse(await agyLines());
-        if (msg.event === 'wake') {
-          if (!turnInterrupted && !stopping) emit(`voice-wake ${JSON.stringify({heard: msg.heard ?? ''})}`);
-          msg = JSON.parse(await agyLines());
-        }
-        if (msg.event === 'transcribed') {
-          const question = String(msg.heard || '');
-          let decision = {action: stopping || turnInterrupted ? 'cancel' : 'continue'};
-          if (!stopping && !turnInterrupted && shouldReadPresentation(platform, presentationReadingEnabled, question)) {
-            const controller = new AbortController();
-            activePresentationAbort = controller;
-            const onStop = () => controller.abort();
-            cancelVoice.signal.addEventListener('abort', onStop, {once: true});
-            try {
-              const answer = await presentationAnswer(wc, question, controller.signal);
-              decision = {action: 'answer', text: answer};
-            } catch {
-              decision = {action: 'cancel'};
-            } finally {
-              cancelVoice.signal.removeEventListener('abort', onStop);
-              if (activePresentationAbort === controller) activePresentationAbort = null;
+        }, {
+          signal: turnAbort.signal,
+          onWake: msg => {
+            if (!turnInterrupted && !stopping && !turnAbort.signal.aborted) {
+              emit(`voice-wake ${JSON.stringify({heard: msg.heard ?? ''})}`);
             }
-          }
-          const response = agyLines();
-          agyDaemon.stdin.write(`${JSON.stringify(decision)}\n`);
-          msg = JSON.parse(await response);
-        }
-        result = msg;
+          },
+          onTranscribed: async msg => {
+            const question = String(msg.heard || '');
+            let decision = {action: stopping || turnInterrupted || turnAbort.signal.aborted ? 'cancel' : 'continue'};
+            if (!stopping && !turnInterrupted && !turnAbort.signal.aborted && shouldReadPresentation(platform, presentationReadingEnabled, question)) {
+              const controller = new AbortController();
+              activePresentationAbort = controller;
+              const onStopPres = () => controller.abort();
+              turnAbort.signal.addEventListener('abort', onStopPres, {once: true});
+              try {
+                const answer = await presentationAnswer(wc, question, controller.signal);
+                decision = {action: 'answer', text: answer};
+              } catch {
+                decision = {action: 'cancel'};
+              } finally {
+                turnAbort.signal.removeEventListener('abort', onStopPres);
+                if (activePresentationAbort === controller) activePresentationAbort = null;
+              }
+            }
+            return decision;
+          },
+        });
         if (result.error) throw new Error(result.error);
         if (result.skipped) {
+          if (isFollowUp && !manual) followUpUntil = 0;
           if (result.notulen_line && listeningMode === 'notulen') {
             meetingNotes.addEntry({text: result.notulen_line, timestampMs: heardAtMs, kind: 'meeting'});
             emit(`voice-notulen ${JSON.stringify({text: result.notulen_line})}`);
@@ -1649,7 +1947,11 @@ if (process.versions.electron) {
           return;
         }
         if (result.heard) agySyncedNoteCursor = notesPayload.nextCursor;
-        if (!result.reply) { if (manual) emit(`voice-no-audio ${JSON.stringify(diag ?? {})}`); return; }
+        if (!result.reply) {
+          if (isFollowUp && !manual) followUpUntil = 0;
+          if (manual) emit(`voice-no-audio ${JSON.stringify((await readDiag()) ?? {})}`);
+          return;
+        }
         if ((await stat(output)).size > 2_000_000) throw new Error('Reply audio too large');
         audio = (await readFile(output)).toString('base64');
       } else {
@@ -1661,15 +1963,16 @@ if (process.versions.electron) {
           await writeFile(contextFile, notesSnapshot, {mode: 0o600});
           extraArgs.push('--context-file', contextFile);
         }
-        const options = {signal: cancelVoice.signal, timeout: 65_000,
+        const options = {signal: turnAbort.signal, timeout: 65_000,
           env: {...process.env, PATH: `/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/.local/bin:${process.env.PATH ?? '/usr/bin:/bin'}`}};
         let presentationQuestion = '';
         if (platform === 'meet' && presentationReadingEnabled) {
           const transcription = await promisify(execFile)('/usr/bin/python3',
             [pipeline, '--from-wav', input, '--no-speak', '--no-notulen', '--transcribe-only', ...extraArgs], options);
-          if (stopping || turnInterrupted) return;
+          if (stopping || turnInterrupted || turnAbort.signal.aborted) return;
           const heard = JSON.parse(transcription.stdout.trim().split(/\r?\n/).pop() ?? '{}');
           if (heard.skipped || !heard.heard) {
+            if (isFollowUp && !manual) followUpUntil = 0;
             if (heard.heard && listeningMode === 'notulen') {
               meetingNotes.addEntry({text: heard.heard, timestampMs: heardAtMs, kind: 'meeting'});
               emit(`voice-notulen ${JSON.stringify({text: heard.heard})}`);
@@ -1687,8 +1990,8 @@ if (process.versions.electron) {
         if (presentationQuestion) {
           const controller = new AbortController();
           activePresentationAbort = controller;
-          const onStop = () => controller.abort();
-          cancelVoice.signal.addEventListener('abort', onStop, {once: true});
+          const onStopPres = () => controller.abort();
+          turnAbort.signal.addEventListener('abort', onStopPres, {once: true});
           try {
             const reply = await presentationAnswer(wc, presentationQuestion, controller.signal);
             const textFile = join(work, 'speech.txt');
@@ -1697,7 +2000,7 @@ if (process.versions.electron) {
               [pipeline, '--speak-text-file', textFile, '--reply-wav', output], {...options, signal: controller.signal});
             result = {heard: presentationQuestion, reply};
           } finally {
-            cancelVoice.signal.removeEventListener('abort', onStop);
+            turnAbort.signal.removeEventListener('abort', onStopPres);
             if (activePresentationAbort === controller) activePresentationAbort = null;
           }
         } else {
@@ -1706,27 +2009,32 @@ if (process.versions.electron) {
           result = JSON.parse(stdout.trim().split(/\r?\n/).pop() ?? '');
         }
         if (result.skipped) {
+          if (isFollowUp && !manual) followUpUntil = 0;
           if (result.heard && listeningMode === 'notulen') {
             meetingNotes.addEntry({text: result.heard, timestampMs: heardAtMs, kind: 'meeting'});
             emit(`voice-notulen ${JSON.stringify({text: result.heard})}`);
           }
           return;
         }
-        if (!result.reply) { if (manual) emit(`voice-no-audio ${JSON.stringify(diag ?? {})}`); return; }
+        if (!result.reply) {
+          if (isFollowUp && !manual) followUpUntil = 0;
+          if (manual) emit(`voice-no-audio ${JSON.stringify((await readDiag()) ?? {})}`);
+          return;
+        }
         if ((await stat(output)).size > 2_000_000) throw new Error('Reply audio too large');
         audio = (await readFile(output)).toString('base64');
       }
-      if (stopping || turnInterrupted) return;
+      if (stopping || turnInterrupted || turnAbort.signal.aborted) return;
       emit('voice-sending');
-      if (!await unmuteAndVerifyMic(wc, read, click, micState, cancelVoice.signal)) {
-        if (!stopping && !turnInterrupted) emit('voice-no-mic');
+      if (!await unmuteAndVerifyMic(wc, read, click, micState, turnAbort.signal)) {
+        if (!stopping && !turnInterrupted && !turnAbort.signal.aborted) emit('voice-no-mic');
         return;
       }
       if (!audio || audio.length > 2_700_000) throw new Error('Invalid reply audio');
-      if (stopping || turnInterrupted) return;
+      if (stopping || turnInterrupted || turnAbort.signal.aborted) return;
       const replyAtMs = Date.now();
       await wc.executeJavaScript(`__nailMedia.play(${JSON.stringify(audio)})`, true);
-      if (!stopping && !turnInterrupted) {
+      if (!stopping && !turnInterrupted && !turnAbort.signal.aborted) {
         const latencyMs = Math.max(0, replyAtMs - heardAtMs);
         if (platform === 'teams') {
           const outDiag = await wc.executeJavaScript('window.__nailMedia?.micOutDiag?.()', true).catch(() => null);
@@ -1734,6 +2042,7 @@ if (process.versions.electron) {
             `TURN_END provider=${provider} latencyMs=${latencyMs} replyLen=${(result.reply || '').length} out=${JSON.stringify(outDiag)}`
           );
         }
+        lastSpokenReply = {text: result.reply || '', at: Date.now()};
         meetingNotes.addExchange({
           heard: result.notulen_line || result.heard,
           reply: result.reply,
@@ -1752,9 +2061,18 @@ if (process.versions.electron) {
         await delay(350);
       }
     } catch (error) {
+      if (stopping || turnInterrupted || turnAbort.signal.aborted || error?.message === 'voice-interrupted' || error?.message === 'manual-preempt' || error?.name === 'AbortError') {
+        return;
+      }
       await logVoiceError(error);
       if (!stopping && !turnInterrupted) emit('voice-failed');
     } finally {
+      cancelVoice.signal.removeEventListener('abort', onStop);
+      if (activeTurnAbort === turnAbort) activeTurnAbort = null;
+      if (autoVoiceAbort === turnAbort) {
+        autoVoiceAbort = null;
+        autoVoicePhase = null;
+      }
       await restoreMeetMute(wc, read, click, micState.restoreMute);
       await rm(work, {recursive: true, force: true});
     }
@@ -1889,8 +2207,11 @@ if (process.versions.electron) {
     const read = () => platform === 'teams'
       ? readTeamsAcrossFrames(wc)
       : wc.executeJavaScript(`(${inspectMeet})()`);
-    startAgyDaemon();
+    agyClient?.ensureReady().catch(() => {});
     codexSession?.warmup().catch(() => {});
+    if (codexHandsFree || (codexSession && platform === 'meet' && presentationReadingEnabled)) {
+      startCodexWakeDaemon().catch(() => {});
+    }
     const click = async item => {
       if (!item) return false;
       const execHost = resolveTargetFrame(wc, item);
@@ -2066,11 +2387,7 @@ if (process.versions.electron) {
           meetingJoined = true;
           syncCodexNotes();
           emit('joined');
-          if (provider === 'codex' && codexSession) {
-            codexSession.ensureConnected(wc, emit)
-              .then(() => { if (!stopping && !voice) emit('voice-standby'); })
-              .catch(() => {});
-          }
+          codexSession?.ensureConnected(wc).catch(() => {});
         } else if (joined && provider && !voice && (turnRequested || provider !== 'codex' || (codexHandsFree && !codexWakeFailed))) {
           const manual = turnRequested;
           turnRequested = false;
@@ -2083,7 +2400,7 @@ if (process.versions.electron) {
           waiting = true;
           emit('waiting');
         }
-        await delay(joined ? 250 : 300);
+        await delay(joined ? (turnRequested ? 25 : 100) : 300);
       }
       if (stopping) {
         return await gracefulLeaveCall(wc, read, click, voice);
@@ -2200,11 +2517,7 @@ if (process.versions.electron) {
         joinedAt = Date.now();
         appendTeamsLog('STATE joined');
         emit('joined');
-        if (provider === 'codex' && codexSession) {
-          codexSession.ensureConnected(wc, emit)
-            .then(() => { if (!stopping && !voice) emit('voice-standby'); })
-            .catch(() => {});
-        }
+        codexSession?.ensureConnected(wc).catch(() => {});
       } else if (joined && !postJoinMuted && !voice && !turnRequested && Date.now() - joinedAt >= 1500) {
         postJoinMuted = true;
         if (state.mute) {
@@ -2222,7 +2535,7 @@ if (process.versions.electron) {
           .catch(() => { if (!stopping) emit('voice-failed'); })
           .finally(() => { voice = null; });
       }
-      await delay(joined ? 250 : 350);
+      await delay(joined ? (turnRequested ? 25 : 100) : 350);
     }
     if (stopping) {
       if (!joined) await Promise.race([saveDiagnosticSnapshot(wc, submitted ? 'teams-stopped-waiting' : 'teams-stopped-lobby'), delay(1200)]);
@@ -2258,10 +2571,7 @@ if (process.versions.electron) {
     meetingJoined = false;
     stopCodexWakeDaemon();
     stopNotesWorker();
-    if (agyDaemon) {
-      killWorkerProcess(agyDaemon);
-      agyDaemon = null;
-    }
+    agyClient?.recycle();
     try { codexSession?.child?.kill('SIGTERM'); } catch {}
     try {
       if (activeWin && !activeWin.isDestroyed()) activeWin.destroy();
@@ -2313,4 +2623,4 @@ if (process.versions.electron) {
   });
 }
 
-module.exports = { attributeNotes, createMeetingNotesMemory, detectPlatform, isAllowedTeamsHost, buildTeamsLightLaunchURL, inspectMeet, inspectTeams, fillTeamsName, findMeetPresentation, captureMeetPresentation, createPresentationOCRBridge, presentationRequestKind, shouldReadPresentation, meetAvatarCameraAction };
+module.exports = { attributeNotes, createMeetingNotesMemory, createAgyDaemonClient, detectPlatform, isAllowedTeamsHost, buildTeamsLightLaunchURL, inspectMeet, inspectTeams, fillTeamsName, findMeetPresentation, captureMeetPresentation, createPresentationOCRBridge, presentationRequestKind, shouldReadPresentation, meetAvatarCameraAction };

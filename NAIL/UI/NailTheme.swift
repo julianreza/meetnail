@@ -11,36 +11,61 @@ extension Color {
     }
 }
 
+enum NeuTone: Equatable, Hashable, Sendable {
+    case porcelain
+    case obsidian
+}
+
 struct NailPalette: Sendable {
     let scheme: ColorScheme
 
     var isDark: Bool { scheme == .dark }
 
-    // MARK: - Option A Spotlight Surfaces (Luminous Porcelain Light & Matte Obsidian Dark)
+    // MARK: - Soft Porcelain (Light) & Sculpted Slate-Obsidian (Dark) Neumorphic Surfaces
 
-    var canvas: Color { isDark ? Color(hex: 0x0F1117) : Color(hex: 0xFBFBFD) }
-    var canvasBottom: Color { isDark ? Color(hex: 0x0B0D12) : Color(hex: 0xF7F9FC) }
-    var sidebar: Color { isDark ? Color(hex: 0x12151C) : Color(hex: 0xF8FAFC) }
-    var card: Color { isDark ? Color(hex: 0x161922) : Color(hex: 0xFFFFFF) }
-    var cardSecondary: Color { isDark ? Color(hex: 0x12151D) : Color(hex: 0xF8FAFC) }
-    var row: Color { isDark ? Color(hex: 0x191D27) : Color(hex: 0xF4F6F9) }
-    var raised: Color { isDark ? Color(hex: 0x1D212D) : Color(hex: 0xFFFFFF) }
+    var canvas: Color { isDark ? Color(hex: 0x1B1F27) : Color(hex: 0xECEFF4) }
+    var canvasBottom: Color { isDark ? Color(hex: 0x161921) : Color(hex: 0xE5E9F1) }
+    var sidebar: Color { isDark ? Color(hex: 0x191D25) : Color(hex: 0xEAEFF5) }
+    var card: Color { isDark ? Color(hex: 0x1E222C) : Color(hex: 0xECEFF4) }
+    var cardSecondary: Color { isDark ? Color(hex: 0x1A1E27) : Color(hex: 0xE7EBF2) }
+    var row: Color { isDark ? Color(hex: 0x1D212B) : Color(hex: 0xE8ECF3) }
+    var raised: Color { isDark ? Color(hex: 0x1E222C) : Color(hex: 0xECEFF4) }
     var cardElevated: Color { raised }
-    var well: Color { isDark ? Color(hex: 0x11141B) : Color(hex: 0xF4F6F9) }
-    var inputBg: Color { isDark ? Color(hex: 0x12151D) : Color(hex: 0xF8FAFC) }
-    var hairline: Color { isDark ? Color.white.opacity(0.08) : Color(hex: 0x0F172A, alpha: 0.075) }
-    var hairlineStrong: Color { isDark ? Color.white.opacity(0.14) : Color(hex: 0x0F172A, alpha: 0.12) }
-    var specularTop: Color { isDark ? Color.white.opacity(0.08) : Color.white.opacity(0.92) }
-    var cardShadow: Color { isDark ? Color(hex: 0x000000, alpha: 0.45) : Color(hex: 0x0F172A, alpha: 0.06) }
+    var well: Color { isDark ? Color(hex: 0x151820) : Color(hex: 0xE5E9F1) }
+    var inputBg: Color { isDark ? Color(hex: 0x151820) : Color(hex: 0xE5E9F1) }
+    var hairline: Color { isDark ? Color.white.opacity(0.08) : Color(hex: 0x0F172A, alpha: 0.06) }
+    var hairlineStrong: Color { isDark ? Color.white.opacity(0.14) : Color(hex: 0x0F172A, alpha: 0.10) }
+    var specularTop: Color { isDark ? Color.white.opacity(0.09) : Color.white.opacity(0.92) }
+    var cardShadow: Color { isDark ? Color(hex: 0x0B0D12, alpha: 0.72) : Color(hex: 0xB8C2D4, alpha: 0.55) }
 
-    // MARK: - Surface Elevation & Subtle Shadow Tokens
+    // MARK: - Porcelain Neumorphic Elevation & Concave Shadow Tokens
 
-    var neuShadowLight: Color { isDark ? Color(hex: 0x262C38).opacity(0.75) : Color.white.opacity(0.95) }
-    var neuShadowDark: Color { isDark ? Color(hex: 0x07090D) : Color(hex: 0x94A3B8, alpha: 0.22) }
-    var neuSurfaceTop: Color { isDark ? Color(hex: 0x191D28) : Color(hex: 0xFFFFFF) }
-    var neuSurfaceBottom: Color { isDark ? Color(hex: 0x141720) : Color(hex: 0xFCFDFF) }
-    var neuWellTop: Color { isDark ? Color(hex: 0x10131A) : Color(hex: 0xF4F6F9) }
-    var neuWellBottom: Color { isDark ? Color(hex: 0x141821) : Color(hex: 0xF8FAFC) }
+    var neuShadowLight: Color { isDark ? Color(hex: 0x2D3444, alpha: 0.72) : Color.white.opacity(0.95) }
+    var neuShadowDark: Color { isDark ? Color(hex: 0x0B0D12, alpha: 0.88) : Color(hex: 0xB8C2D4, alpha: 0.62) }
+    var neuInsetDark: Color { isDark ? Color(hex: 0x090B0F, alpha: 0.84) : Color(hex: 0xB2BDCE, alpha: 0.65) }
+    var neuInsetLight: Color { isDark ? Color(hex: 0x2F3646, alpha: 0.55) : Color.white.opacity(0.94) }
+    var neuSurfaceTop: Color { isDark ? Color(hex: 0x232834) : Color(hex: 0xF3F6FA) }
+    var neuSurfaceBottom: Color { isDark ? Color(hex: 0x191D26) : Color(hex: 0xE5E9F1) }
+    var neuWellTop: Color { isDark ? Color(hex: 0x12151C) : Color(hex: 0xDFE4EE) }
+    var neuWellBottom: Color { isDark ? Color(hex: 0x1C212B) : Color(hex: 0xEEF1F7) }
+
+    // MARK: - Obsidian Neumorphic Elevation & Concave Shadow Tokens
+
+    var obsidianSurfaceTop: Color { isDark ? Color(hex: 0x1A1E27) : Color(hex: 0x1B1F27) }
+    var obsidianSurfaceBottom: Color { isDark ? Color(hex: 0x0E1016) : Color(hex: 0x0E1015) }
+    var obsidianWell: Color { Color(hex: 0x090B0F) }
+    var obsidianWellTop: Color { Color(hex: 0x06070A) }
+    var obsidianWellBottom: Color { Color(hex: 0x141820) }
+    var obsidianShadowLight: Color {
+        isDark ? Color(hex: 0x2E3545, alpha: 0.52) : Color(hex: 0x3A4254, alpha: 0.34)
+    }
+    var obsidianShadowDark: Color {
+        isDark ? Color.black.opacity(0.92) : Color(hex: 0x07090D, alpha: 0.44)
+    }
+    var obsidianInsetDark: Color { Color.black.opacity(0.92) }
+    var obsidianInsetLight: Color { Color(hex: 0x313848, alpha: 0.46) }
+    var obsidianRimTop: Color { Color.white.opacity(0.18) }
+    var obsidianRimMid: Color { Color.white.opacity(0.05) }
 
     var canvasGradient: LinearGradient {
         LinearGradient(colors: [canvas, canvasBottom], startPoint: .topLeading, endPoint: .bottomTrailing)
@@ -54,24 +79,90 @@ struct NailPalette: Sendable {
         LinearGradient(colors: [neuWellTop, neuWellBottom], startPoint: .topLeading, endPoint: .bottomTrailing)
     }
 
+    var obsidianSurfaceGradient: LinearGradient {
+        LinearGradient(colors: [obsidianSurfaceTop, obsidianSurfaceBottom], startPoint: .topLeading, endPoint: .bottomTrailing)
+    }
+
+    var obsidianWellGradient: LinearGradient {
+        LinearGradient(colors: [obsidianWellTop, obsidianWellBottom], startPoint: .topLeading, endPoint: .bottomTrailing)
+    }
+
     // MARK: - Ink Card Tokens (Obsidian Featured Surface)
 
-    var inkCard: Color { isDark ? Color(hex: 0x090B0E) : Color(hex: 0x0A0A0A) }
-    var inkCardSurface: Color { isDark ? Color(hex: 0x12151B) : Color(hex: 0x141414) }
-    var inkCardText: Color { Color(hex: 0xF0F0F0) }
-    var inkCardMuted: Color { Color(hex: 0x9A9A9A) }
-    var inkCardLine: Color { Color.white.opacity(0.10) }
-    var inkCardTrack: Color { Color(hex: 0x2E2E2E) }
-    var inkCardFill: Color { Color(hex: 0xF5F5F5) }
+    var inkCard: Color { isDark ? Color(hex: 0x101319) : Color(hex: 0x12151B) }
+    var inkCardSurface: Color { isDark ? Color(hex: 0x171B23) : Color(hex: 0x181C24) }
+    var inkCardText: Color { Color(hex: 0xF4F6FA) }
+    var inkCardMuted: Color { Color(hex: 0x9CA3AF) }
+    var inkCardLine: Color { Color.white.opacity(0.11) }
+    var inkCardTrack: Color { Color(hex: 0x262B36) }
+    var inkCardFill: Color { Color(hex: 0xF4F6FA) }
+
+    // MARK: - Tone-Resolved Helpers
+
+    func primaryText(for tone: NeuTone) -> Color {
+        tone == .obsidian ? inkCardText : textPrimary
+    }
+
+    func secondaryText(for tone: NeuTone) -> Color {
+        tone == .obsidian ? inkCardMuted : textSecondary
+    }
+
+    func tertiaryText(for tone: NeuTone) -> Color {
+        tone == .obsidian ? inkCardMuted.opacity(0.78) : textTertiary
+    }
+
+    func hairline(for tone: NeuTone) -> Color {
+        tone == .obsidian ? inkCardLine : hairline
+    }
+
+    func hairlineStrong(for tone: NeuTone) -> Color {
+        tone == .obsidian ? Color.white.opacity(0.18) : hairlineStrong
+    }
+
+    func surfaceTop(for tone: NeuTone) -> Color {
+        tone == .obsidian ? obsidianSurfaceTop : neuSurfaceTop
+    }
+
+    func surfaceBottom(for tone: NeuTone) -> Color {
+        tone == .obsidian ? obsidianSurfaceBottom : neuSurfaceBottom
+    }
+
+    func wellColor(for tone: NeuTone) -> Color {
+        tone == .obsidian ? obsidianWell : well
+    }
+
+    func wellTop(for tone: NeuTone) -> Color {
+        tone == .obsidian ? obsidianWellTop : neuWellTop
+    }
+
+    func wellBottom(for tone: NeuTone) -> Color {
+        tone == .obsidian ? obsidianWellBottom : neuWellBottom
+    }
+
+    func shadowLight(for tone: NeuTone) -> Color {
+        tone == .obsidian ? obsidianShadowLight : neuShadowLight
+    }
+
+    func shadowDark(for tone: NeuTone) -> Color {
+        tone == .obsidian ? obsidianShadowDark : neuShadowDark
+    }
+
+    func insetDark(for tone: NeuTone) -> Color {
+        tone == .obsidian ? obsidianInsetDark : neuInsetDark
+    }
+
+    func insetLight(for tone: NeuTone) -> Color {
+        tone == .obsidian ? obsidianInsetLight : neuInsetLight
+    }
 
     // MARK: - Obsidian Ink Accent & High-Contrast Text
 
-    var accent: Color { isDark ? Color(hex: 0xF8FAFC) : Color(hex: 0x111113) }
-    var accentInk: Color { isDark ? Color(hex: 0x111113) : Color(hex: 0xFFFFFF) }
-    var accentSoft: Color { isDark ? Color(hex: 0x232836) : Color(hex: 0xF1F5F9) }
-    var textPrimary: Color { isDark ? Color(hex: 0xF5F6F8) : Color(hex: 0x111113) }
-    var textSecondary: Color { isDark ? Color(hex: 0x9CA3AF) : Color(hex: 0x475569) }
-    var textTertiary: Color { isDark ? Color(hex: 0x6B7280) : Color(hex: 0x64748B) }
+    var accent: Color { isDark ? Color(hex: 0xF3F6FB) : Color(hex: 0x1B2028) }
+    var accentInk: Color { isDark ? Color(hex: 0x14171F) : .white }
+    var accentSoft: Color { isDark ? Color(hex: 0x252B38) : Color(hex: 0xE2E7F0) }
+    var textPrimary: Color { isDark ? Color(hex: 0xF5F6F8) : Color(hex: 0x161B26) }
+    var textSecondary: Color { isDark ? Color(hex: 0x9CA3AF) : Color(hex: 0x5B6474) }
+    var textTertiary: Color { isDark ? Color(hex: 0x7A8496) : Color(hex: 0x7A8496) }
 
     // MARK: - Backwards-Compatible Obsidian Accent Aliases (Remapped from Cobalt)
 
@@ -88,12 +179,12 @@ struct NailPalette: Sendable {
 
     // MARK: - Restrained Semantic Status
 
-    var good: Color { isDark ? Color(hex: 0x34D399) : Color(hex: 0x059669) }
+    var good: Color { isDark ? Color(hex: 0x22C58B) : Color(hex: 0x00B67A) }
     var bad: Color { isDark ? Color(hex: 0xF87171) : Color(hex: 0xDC2626) }
     var warn: Color { isDark ? Color(hex: 0xFBBF24) : Color(hex: 0xD97706) }
     var info: Color { isDark ? Color(hex: 0xB8C0CC) : Color(hex: 0x475569) }
 
-    var goodSoft: Color { isDark ? Color(hex: 0x10B981, alpha: 0.14) : Color(hex: 0xECFDF5) }
+    var goodSoft: Color { isDark ? Color(hex: 0x22C58B, alpha: 0.16) : Color(hex: 0x00B67A, alpha: 0.12) }
     var badSoft: Color { bad.opacity(isDark ? 0.16 : 0.10) }
     var warnSoft: Color { warn.opacity(isDark ? 0.15 : 0.10) }
     var infoSoft: Color { info.opacity(isDark ? 0.15 : 0.10) }
@@ -534,6 +625,299 @@ extension View {
     }
 }
 
+// MARK: - Neumorphic Surface Primitives
+
+private struct NeuContainerShape: InsettableShape {
+    let cornerRadius: CGFloat
+    let isCapsule: Bool
+    var insetAmount: CGFloat = 0
+
+    func path(in rect: CGRect) -> Path {
+        let insetRect = rect.insetBy(dx: insetAmount, dy: insetAmount)
+        guard insetRect.width > 0, insetRect.height > 0 else { return Path() }
+        if isCapsule {
+            return Capsule(style: .continuous).path(in: insetRect)
+        }
+        let radius = max(cornerRadius - insetAmount, 0)
+        return RoundedRectangle(cornerRadius: radius, style: .continuous).path(in: insetRect)
+    }
+
+    func inset(by amount: CGFloat) -> NeuContainerShape {
+        var copy = self
+        copy.insetAmount += amount
+        return copy
+    }
+}
+
+/// Convex extruded neumorphic surface with dual directional shadows and a top-left specular rim.
+struct NeuRaisedBackground: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    var cornerRadius: CGFloat = 18
+    var isCapsule: Bool = false
+    var elevation: CGFloat = 1.0
+    var isPressed: Bool = false
+    var tint: Color? = nil
+    var tone: NeuTone = .porcelain
+
+    init(
+        cornerRadius: CGFloat = 18,
+        isCapsule: Bool = false,
+        elevation: CGFloat = 1.0,
+        isPressed: Bool = false,
+        tint: Color? = nil,
+        tone: NeuTone = .porcelain
+    ) {
+        self.cornerRadius = cornerRadius
+        self.isCapsule = isCapsule
+        self.elevation = elevation
+        self.isPressed = isPressed
+        self.tint = tint
+        self.tone = tone
+    }
+
+    var body: some View {
+        let palette = NailPalette(scheme: colorScheme)
+        let shape = NeuContainerShape(cornerRadius: cornerRadius, isCapsule: isCapsule)
+        let clampedElevation = max(elevation, 0.1)
+        let isObsidian = tone == .obsidian
+
+        if isPressed {
+            NeuInsetBackground(
+                cornerRadius: cornerRadius,
+                isCapsule: isCapsule,
+                depth: 0.65 * clampedElevation,
+                tone: tone
+            )
+            .overlay {
+                if let tint {
+                    shape.fill(tint.opacity(isObsidian || palette.isDark ? 0.16 : 0.10))
+                }
+            }
+        } else {
+            let rimTopColor: Color = isObsidian
+                ? palette.obsidianRimTop
+                : (palette.isDark ? Color.white.opacity(0.14) : Color.white.opacity(0.95))
+            let rimMidColor: Color = isObsidian
+                ? palette.obsidianRimMid
+                : (palette.isDark ? Color.white.opacity(0.03) : Color.white.opacity(0.28))
+            let rimBottomColor: Color = tint?.opacity(isObsidian || palette.isDark ? 0.34 : 0.24)
+                ?? palette.hairline(for: tone)
+
+            shape
+                .fill(
+                    LinearGradient(
+                        colors: [palette.surfaceTop(for: tone), palette.surfaceBottom(for: tone)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .overlay {
+                    if let tint {
+                        shape.fill(tint.opacity(isObsidian || palette.isDark ? 0.16 : 0.10))
+                    }
+                }
+                .shadow(
+                    color: palette.shadowLight(for: tone),
+                    radius: (isObsidian ? 5.5 : 7.0) * clampedElevation,
+                    x: (isObsidian ? -3.2 : -4.0) * clampedElevation,
+                    y: (isObsidian ? -3.2 : -4.0) * clampedElevation
+                )
+                .shadow(
+                    color: palette.shadowDark(for: tone),
+                    radius: (isObsidian ? 10.0 : 9.0) * clampedElevation,
+                    x: (isObsidian ? 5.5 : 5.0) * clampedElevation,
+                    y: (isObsidian ? 6.0 : 5.0) * clampedElevation
+                )
+                .overlay {
+                    shape.strokeBorder(
+                        LinearGradient(
+                            colors: [rimTopColor, rimMidColor, rimBottomColor],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 1
+                    )
+                }
+        }
+    }
+}
+
+/// Concave debossed neumorphic well using macOS 14+ native inner shadows and carved rim bevels.
+struct NeuInsetBackground: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    var cornerRadius: CGFloat = 16
+    var isCapsule: Bool = false
+    var depth: CGFloat = 1.0
+    var tone: NeuTone = .porcelain
+
+    init(
+        cornerRadius: CGFloat = 16,
+        isCapsule: Bool = false,
+        depth: CGFloat = 1.0,
+        tone: NeuTone = .porcelain
+    ) {
+        self.cornerRadius = cornerRadius
+        self.isCapsule = isCapsule
+        self.depth = depth
+        self.tone = tone
+    }
+
+    var body: some View {
+        let palette = NailPalette(scheme: colorScheme)
+        let shape = NeuContainerShape(cornerRadius: cornerRadius, isCapsule: isCapsule)
+        let clampedDepth = max(depth, 0.1)
+        let isObsidian = tone == .obsidian
+
+        shape
+            .fill(
+                palette.wellColor(for: tone)
+                    .shadow(.inner(
+                        color: palette.insetDark(for: tone),
+                        radius: 4 * clampedDepth,
+                        x: 2.5 * clampedDepth,
+                        y: 2.5 * clampedDepth
+                    ))
+                    .shadow(.inner(
+                        color: palette.insetLight(for: tone),
+                        radius: 4 * clampedDepth,
+                        x: -2.5 * clampedDepth,
+                        y: -2.5 * clampedDepth
+                    ))
+            )
+            .shadow(
+                color: palette.shadowLight(for: tone).opacity(isObsidian || palette.isDark ? 0.38 : 0.72),
+                radius: 1.5 * clampedDepth,
+                x: 1.0 * clampedDepth,
+                y: 1.0 * clampedDepth
+            )
+            .overlay {
+                shape.strokeBorder(
+                    LinearGradient(
+                        colors: [
+                            palette.hairlineStrong(for: tone),
+                            palette.hairline(for: tone).opacity(0.45),
+                            palette.insetLight(for: tone).opacity(isObsidian || palette.isDark ? 0.42 : 0.72),
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    lineWidth: 0.9
+                )
+            }
+    }
+}
+
+/// Tactile 42x24 neumorphic capsule switch with floating sculpted porcelain thumb.
+struct NeuSwitchToggle: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.isEnabled) private var isEnabled
+
+    @Binding var isOn: Bool
+    var label: String? = nil
+    var tone: NeuTone = .porcelain
+
+    init(isOn: Binding<Bool>, label: String? = nil, tone: NeuTone = .porcelain) {
+        self._isOn = isOn
+        self.label = label
+        self.tone = tone
+    }
+
+    var body: some View {
+        let palette = NailPalette(scheme: colorScheme)
+        let isObsidian = tone == .obsidian
+
+        Button {
+            if reduceMotion {
+                isOn.toggle()
+            } else {
+                withAnimation(.spring(response: 0.28, dampingFraction: 0.78)) {
+                    isOn.toggle()
+                }
+            }
+        } label: {
+            HStack(spacing: 8) {
+                ZStack {
+                    if isOn {
+                        Capsule(style: .continuous)
+                            .fill(
+                                palette.good
+                                    .shadow(.inner(
+                                        color: Color.black.opacity(0.24),
+                                        radius: 2.5,
+                                        x: 1.5,
+                                        y: 1.5
+                                    ))
+                                    .shadow(.inner(
+                                        color: Color.white.opacity(0.26),
+                                        radius: 2.0,
+                                        x: -1.0,
+                                        y: -1.0
+                                    ))
+                            )
+                            .overlay {
+                                Capsule(style: .continuous)
+                                    .strokeBorder(
+                                        LinearGradient(
+                                            colors: [
+                                                Color.black.opacity(0.12),
+                                                Color.white.opacity(0.34),
+                                            ],
+                                            startPoint: .topLeading,
+                                            endPoint: .bottomTrailing
+                                        ),
+                                        lineWidth: 0.8
+                                    )
+                            }
+                    } else {
+                        NeuInsetBackground(isCapsule: true, depth: 0.85, tone: tone)
+                    }
+
+                    Circle()
+                        .fill(
+                            LinearGradient(
+                                colors: [Color.white, Color(hex: 0xE6ECF5)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .frame(width: 18, height: 18)
+                        .overlay {
+                            Circle()
+                                .strokeBorder(Color.white.opacity(0.95), lineWidth: 0.75)
+                        }
+                        .shadow(
+                            color: Color.black.opacity(isObsidian || palette.isDark ? 0.48 : 0.20),
+                            radius: 2.5,
+                            x: 0,
+                            y: 1.5
+                        )
+                        .offset(x: isOn ? 9 : -9)
+                }
+                .frame(width: 42, height: 24)
+                .animation(
+                    reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.78),
+                    value: isOn
+                )
+
+                if let label, !label.isEmpty {
+                    Text(label)
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(palette.secondaryText(for: tone))
+                        .lineLimit(1)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .opacity(isEnabled ? 1.0 : 0.55)
+        .accessibilityLabel(label ?? "Sakelar")
+        .accessibilityValue(isOn ? "Aktif" : "Nonaktif")
+    }
+}
+
 // MARK: - Elevated macOS Surfaces & Inset Wells
 
 enum TalmoCardSurface: Sendable {
@@ -548,87 +932,34 @@ struct TalmoCard<Content: View>: View {
     var padding: CGFloat = 20
     var cornerRadius: CGFloat = 20
     var surface: TalmoCardSurface = .card
+    var tone: NeuTone = .porcelain
     @ViewBuilder var content: () -> Content
 
     init(
         padding: CGFloat = 20,
         cornerRadius: CGFloat = 20,
         surface: TalmoCardSurface = .card,
+        tone: NeuTone = .porcelain,
         @ViewBuilder content: @escaping () -> Content
     ) {
         self.padding = padding
         self.cornerRadius = cornerRadius
         self.surface = surface
+        self.tone = tone
         self.content = content
     }
 
     var body: some View {
-        let palette = NailPalette(scheme: colorScheme)
-        let fillGradient: LinearGradient = switch surface {
-        case .card:
-            LinearGradient(
-                colors: [palette.card, palette.neuSurfaceBottom],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-        case .secondary:
-            LinearGradient(
-                colors: [
-                    palette.cardSecondary,
-                    palette.isDark ? Color(hex: 0x10131A) : palette.row
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-        case .raised:
-            LinearGradient(
-                colors: [
-                    palette.raised,
-                    palette.isDark ? Color(hex: 0x191D28) : palette.neuSurfaceBottom
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
+        let elevation: CGFloat = switch surface {
+        case .raised: 1.15
+        case .card: 0.9
+        case .secondary: 0.75
         }
 
         content()
             .padding(padding)
             .background {
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(fillGradient)
-                    .shadow(
-                        color: palette.isDark
-                            ? Color.black.opacity(0.24)
-                            : Color(hex: 0x0F172A, alpha: 0.035),
-                        radius: 3,
-                        x: 0,
-                        y: 1
-                    )
-                    .shadow(
-                        color: palette.cardShadow,
-                        radius: 14,
-                        x: 0,
-                        y: 6
-                    )
-                    .overlay {
-                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                            .strokeBorder(palette.hairline, lineWidth: 1)
-                    }
-                    .overlay {
-                        RoundedRectangle(cornerRadius: max(cornerRadius - 1, 0), style: .continuous)
-                            .strokeBorder(
-                                LinearGradient(
-                                    colors: [
-                                        Color.white.opacity(palette.isDark ? 0.07 : 0.85),
-                                        Color.clear
-                                    ],
-                                    startPoint: .top,
-                                    endPoint: UnitPoint(x: 0.5, y: 0.28)
-                                ),
-                                lineWidth: 1
-                            )
-                            .padding(1)
-                    }
+                NeuRaisedBackground(cornerRadius: cornerRadius, elevation: elevation, tone: tone)
             }
             .animation(
                 reduceMotion ? nil : .spring(response: 0.42, dampingFraction: 0.86),
@@ -642,54 +973,26 @@ struct NeuWell<Content: View>: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var padding: CGFloat = 14
     var cornerRadius: CGFloat = 18
+    var tone: NeuTone = .porcelain
     @ViewBuilder var content: () -> Content
 
     init(
         padding: CGFloat = 14,
         cornerRadius: CGFloat = 18,
+        tone: NeuTone = .porcelain,
         @ViewBuilder content: @escaping () -> Content
     ) {
         self.padding = padding
         self.cornerRadius = cornerRadius
+        self.tone = tone
         self.content = content
     }
 
     var body: some View {
-        let palette = NailPalette(scheme: colorScheme)
-
         content()
             .padding(padding)
             .background {
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(
-                        LinearGradient(
-                            colors: [palette.neuWellTop, palette.neuWellBottom],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
-                    .overlay {
-                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                            .fill(
-                                LinearGradient(
-                                    colors: [
-                                        palette.isDark
-                                            ? Color.black.opacity(0.22)
-                                            : Color(hex: 0x0F172A, alpha: 0.03),
-                                        Color.clear
-                                    ],
-                                    startPoint: .top,
-                                    endPoint: UnitPoint(x: 0.5, y: 0.35)
-                                )
-                            )
-                    }
-                    .overlay {
-                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                            .strokeBorder(
-                                palette.isDark ? palette.hairline : palette.hairlineStrong,
-                                lineWidth: 1
-                            )
-                    }
+                NeuInsetBackground(cornerRadius: cornerRadius, depth: 0.95, tone: tone)
             }
             .animation(
                 reduceMotion ? nil : .spring(response: 0.42, dampingFraction: 0.86),
@@ -704,59 +1007,82 @@ struct NeuAcousticDial<CenterContent: View>: View {
     var size: CGFloat = 148
     var isActive: Bool = false
     var showYellowSpark: Bool = true
+    var tone: NeuTone = .porcelain
     @ViewBuilder var center: () -> CenterContent
 
     init(
         size: CGFloat = 148,
         isActive: Bool = false,
         showYellowSpark: Bool = true,
+        tone: NeuTone = .porcelain,
         @ViewBuilder center: @escaping () -> CenterContent
     ) {
         self.size = size
         self.isActive = isActive
         self.showYellowSpark = showYellowSpark
+        self.tone = tone
         self.center = center
     }
 
     var body: some View {
         let palette = NailPalette(scheme: colorScheme)
-        let ringSize = max(size - 12, 24)
-        let wellSize = size * 0.76
+        let isObsidian = tone == .obsidian
+        let ringSize = max(size - 10, 24)
+        let wellSize = size * 0.84
         let tickRadius = (ringSize + wellSize) * 0.25
         let arcLineWidth = max(2.2, min(3.0, size * 0.017))
 
         ZStack {
-            // 1. Sculpted luminous porcelain outer bezel
+            // 1. Sculpted dual-shadow neumorphic outer bezel
             Circle()
                 .fill(
                     LinearGradient(
-                        colors: palette.isDark
-                            ? [Color(hex: 0x1D222E), Color(hex: 0x151922)]
-                            : [Color.white, Color(hex: 0xF8FAFC)],
-                        startPoint: .top,
-                        endPoint: .bottom
+                        colors: [palette.surfaceTop(for: tone), palette.surfaceBottom(for: tone)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
                     )
                 )
                 .frame(width: size, height: size)
                 .shadow(
-                    color: Color.black.opacity(palette.isDark ? 0.34 : 0.06),
-                    radius: 14,
-                    x: 0,
-                    y: 5
+                    color: palette.shadowLight(for: tone),
+                    radius: isObsidian ? 10 : 14,
+                    x: isObsidian ? -5 : -7,
+                    y: isObsidian ? -5 : -7
+                )
+                .shadow(
+                    color: palette.shadowDark(for: tone),
+                    radius: isObsidian ? 16 : 16,
+                    x: 8,
+                    y: 8
                 )
                 .overlay {
                     Circle()
-                        .strokeBorder(palette.hairline, lineWidth: 1)
+                        .strokeBorder(
+                            LinearGradient(
+                                colors: [
+                                    isObsidian
+                                        ? palette.obsidianRimTop
+                                        : (palette.isDark ? Color.white.opacity(0.14) : Color.white.opacity(0.95)),
+                                    isObsidian
+                                        ? palette.obsidianRimMid
+                                        : (palette.isDark ? Color.white.opacity(0.03) : Color.white.opacity(0.28)),
+                                    palette.hairline(for: tone),
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            lineWidth: 1
+                        )
                 }
 
             // 2. Crisp dial hairline track, cardinal ticks, and emerald-to-gold studio aura spark arc
             Circle()
-                .strokeBorder(palette.hairline, lineWidth: 1)
+                .strokeBorder(palette.hairline(for: tone), lineWidth: 1)
                 .frame(width: ringSize, height: ringSize)
 
             ForEach(0..<4, id: \.self) { idx in
                 Capsule(style: .continuous)
-                    .fill(palette.hairlineStrong.opacity(0.60))
+                    .fill(palette.hairlineStrong(for: tone).opacity(0.65))
                     .frame(width: 1, height: max(3.0, size * 0.026))
                     .offset(y: -tickRadius)
                     .rotationEffect(.degrees(Double(idx) * 90))
@@ -802,21 +1128,41 @@ struct NeuAcousticDial<CenterContent: View>: View {
                     )
             }
 
-            // 3. Soft recessed inner porcelain well
+            // 3. Concave inner well
             Circle()
                 .fill(
                     LinearGradient(
-                        colors: palette.isDark
-                            ? [Color(hex: 0x12161E), Color(hex: 0x171C26)]
-                            : [Color(hex: 0xF4F7FB), Color.white],
-                        startPoint: .top,
-                        endPoint: .bottom
+                        colors: [palette.wellTop(for: tone), palette.wellBottom(for: tone)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
                     )
+                    .shadow(.inner(
+                        color: palette.insetDark(for: tone),
+                        radius: 5.5,
+                        x: 3.5,
+                        y: 3.5
+                    ))
+                    .shadow(.inner(
+                        color: palette.insetLight(for: tone),
+                        radius: 5.5,
+                        x: -3.5,
+                        y: -3.5
+                    ))
                 )
                 .frame(width: wellSize, height: wellSize)
                 .overlay {
                     Circle()
-                        .strokeBorder(palette.hairline, lineWidth: 1)
+                        .strokeBorder(
+                            LinearGradient(
+                                colors: [
+                                    palette.hairline(for: tone),
+                                    palette.insetLight(for: tone).opacity(isObsidian || palette.isDark ? 0.40 : 0.72),
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            lineWidth: 0.9
+                        )
                 }
 
             // 4. Subtle ambient ground shadow ellipse + floating center() inside the well
@@ -825,11 +1171,11 @@ struct NeuAcousticDial<CenterContent: View>: View {
                     .fill(
                         RadialGradient(
                             colors: [
-                                palette.isDark
-                                    ? Color.black.opacity(0.45)
+                                isObsidian || palette.isDark
+                                    ? Color.black.opacity(0.50)
                                     : Color(hex: 0x0F172A, alpha: 0.10),
-                                palette.isDark
-                                    ? Color.black.opacity(0.16)
+                                isObsidian || palette.isDark
+                                    ? Color.black.opacity(0.18)
                                     : Color(hex: 0x0F172A, alpha: 0.035),
                                 Color.clear,
                             ],
@@ -871,33 +1217,14 @@ struct TalmoInkCard<Content: View>: View {
     }
 
     var body: some View {
-        let palette = NailPalette(scheme: colorScheme)
-
         content()
             .padding(padding)
             .background {
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(palette.inkCard)
-                    .overlay {
-                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                            .fill(
-                                LinearGradient(
-                                    colors: [Color.white.opacity(0.045), Color.clear],
-                                    startPoint: .top,
-                                    endPoint: .center
-                                )
-                            )
-                    }
-                    .shadow(
-                        color: Color.black.opacity(palette.isDark ? 0.55 : 0.22),
-                        radius: 18,
-                        x: 0,
-                        y: 8
-                    )
-                    .overlay {
-                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                            .strokeBorder(palette.inkCardLine, lineWidth: 1)
-                    }
+                NeuRaisedBackground(
+                    cornerRadius: cornerRadius,
+                    elevation: 1.05,
+                    tone: .obsidian
+                )
             }
     }
 }
@@ -906,17 +1233,20 @@ struct NailGlassCard<Content: View>: View {
     var padding: CGFloat = 20
     var cornerRadius: CGFloat = 20
     var elevated: Bool = false
+    var tone: NeuTone = .porcelain
     @ViewBuilder var content: () -> Content
 
     init(
         padding: CGFloat = 20,
         cornerRadius: CGFloat = 20,
         elevated: Bool = false,
+        tone: NeuTone = .porcelain,
         @ViewBuilder content: @escaping () -> Content
     ) {
         self.padding = padding
         self.cornerRadius = cornerRadius
         self.elevated = elevated
+        self.tone = tone
         self.content = content
     }
 
@@ -925,6 +1255,7 @@ struct NailGlassCard<Content: View>: View {
             padding: padding,
             cornerRadius: cornerRadius,
             surface: elevated ? .raised : .card,
+            tone: tone,
             content: content
         )
     }
@@ -936,20 +1267,24 @@ struct TalmoPageHeader<Trailing: View>: View {
     @Environment(\.colorScheme) private var colorScheme
     let title: String
     let subtitle: String
+    var tone: NeuTone = .porcelain
     let trailing: Trailing
 
     init(
         title: String,
         subtitle: String,
+        tone: NeuTone = .porcelain,
         @ViewBuilder trailing: () -> Trailing
     ) {
         self.title = title
         self.subtitle = subtitle
+        self.tone = tone
         self.trailing = trailing()
     }
 
     var body: some View {
         let palette = NailPalette(scheme: colorScheme)
+        let accentBarColor = tone == .obsidian ? palette.inkCardFill : palette.accent
 
         HStack(alignment: .center, spacing: 16) {
             VStack(alignment: .leading, spacing: 5) {
@@ -957,12 +1292,12 @@ struct TalmoPageHeader<Trailing: View>: View {
                     Text(title)
                         .font(.system(size: 26, weight: .semibold, design: .serif))
                         .tracking(-0.4)
-                        .foregroundStyle(palette.textPrimary)
+                        .foregroundStyle(palette.primaryText(for: tone))
                         .lineLimit(1)
 
                     HStack(spacing: 4) {
                         Capsule(style: .continuous)
-                            .fill(palette.accent)
+                            .fill(accentBarColor)
                             .frame(width: 20, height: 2.5)
 
                         Capsule(style: .continuous)
@@ -974,7 +1309,7 @@ struct TalmoPageHeader<Trailing: View>: View {
                 if !subtitle.isEmpty {
                     Text(subtitle)
                         .font(.system(size: 13))
-                        .foregroundStyle(palette.textSecondary)
+                        .foregroundStyle(palette.secondaryText(for: tone))
                         .lineLimit(1)
                 }
             }
@@ -987,8 +1322,8 @@ struct TalmoPageHeader<Trailing: View>: View {
 }
 
 extension TalmoPageHeader where Trailing == EmptyView {
-    init(title: String, subtitle: String) {
-        self.init(title: title, subtitle: subtitle) {
+    init(title: String, subtitle: String, tone: NeuTone = .porcelain) {
+        self.init(title: title, subtitle: subtitle, tone: tone) {
             EmptyView()
         }
     }
@@ -1004,6 +1339,7 @@ struct TalmoSegmentedPill<Option: Identifiable & Hashable>: View {
     let options: [Option]
     @Binding var selection: Option
     var compact: Bool = false
+    var tone: NeuTone = .porcelain
     var icon: ((Option) -> String?)? = nil
     var badge: ((Option) -> String?)? = nil
     var dotColor: ((Option) -> Color?)? = nil
@@ -1013,6 +1349,7 @@ struct TalmoSegmentedPill<Option: Identifiable & Hashable>: View {
         options: [Option],
         selection: Binding<Option>,
         compact: Bool = false,
+        tone: NeuTone = .porcelain,
         icon: ((Option) -> String?)? = nil,
         badge: ((Option) -> String?)? = nil,
         dotColor: ((Option) -> Color?)? = nil,
@@ -1021,6 +1358,7 @@ struct TalmoSegmentedPill<Option: Identifiable & Hashable>: View {
         self.options = options
         self._selection = selection
         self.compact = compact
+        self.tone = tone
         self.icon = icon
         self.badge = badge
         self.dotColor = dotColor
@@ -1029,8 +1367,6 @@ struct TalmoSegmentedPill<Option: Identifiable & Hashable>: View {
 
     var body: some View {
         let palette = NailPalette(scheme: colorScheme)
-        let trackRadius: CGFloat = compact ? 12 : 15
-        let pillRadius: CGFloat = compact ? 9.5 : 11.5
 
         HStack(spacing: compact ? 3 : 5) {
             ForEach(options) { option in
@@ -1085,70 +1421,94 @@ struct TalmoSegmentedPill<Option: Identifiable & Hashable>: View {
                     .padding(.vertical, compact ? 6 : 8)
                     .background {
                         if isSelected {
-                            RoundedRectangle(cornerRadius: pillRadius, style: .continuous)
-                                .fill(palette.isDark ? palette.accentSoft : Color.white)
-                                .shadow(
-                                    color: palette.isDark
-                                        ? Color.black.opacity(0.32)
-                                        : Color(hex: 0x0F172A, alpha: 0.07),
-                                    radius: compact ? 3 : 4,
-                                    x: 0,
-                                    y: 1.5
-                                )
-                                .overlay {
-                                    RoundedRectangle(cornerRadius: pillRadius, style: .continuous)
-                                        .strokeBorder(
-                                            palette.isDark
-                                                ? Color.white.opacity(0.12)
-                                                : palette.hairlineStrong,
-                                            lineWidth: 1
-                                        )
-                                }
-                                .matchedGeometryEffect(id: "TalmoActiveSegment", in: pillNamespace)
+                            let activeTone: NeuTone = tone == .obsidian ? .porcelain : .obsidian
+                            NeuRaisedBackground(
+                                isCapsule: true,
+                                elevation: compact ? 0.50 : 0.65,
+                                tone: activeTone
+                            )
+                            .matchedGeometryEffect(id: "TalmoActiveSegment", in: pillNamespace)
                         }
                     }
-                    .contentShape(RoundedRectangle(cornerRadius: pillRadius, style: .continuous))
+                    .contentShape(Capsule(style: .continuous))
                 }
                 .buttonStyle(.plain)
             }
         }
         .padding(compact ? 3.5 : 4.5)
         .background {
-            RoundedRectangle(cornerRadius: trackRadius, style: .continuous)
-                .fill(palette.well)
-                .overlay {
-                    RoundedRectangle(cornerRadius: trackRadius, style: .continuous)
-                        .strokeBorder(
-                            palette.isDark ? palette.hairline : palette.hairlineStrong,
-                            lineWidth: 1
-                        )
-                }
+            NeuInsetBackground(isCapsule: true, depth: compact ? 0.72 : 0.85, tone: tone)
         }
     }
 
+    private var activeSegmentTone: NeuTone {
+        tone == .obsidian ? .porcelain : .obsidian
+    }
+
     private func segmentForeground(isSelected: Bool, palette: NailPalette) -> Color {
-        if isSelected {
-            return palette.textPrimary
-        }
-        return palette.textSecondary
+        isSelected ? palette.primaryText(for: activeSegmentTone) : palette.secondaryText(for: tone)
     }
 
     private func badgeBackground(isSelected: Bool, palette: NailPalette) -> Color {
         if isSelected {
+            if activeSegmentTone == .obsidian {
+                return Color.white.opacity(0.18)
+            }
             return palette.accent.opacity(palette.isDark ? 0.18 : 0.10)
+        }
+        if tone == .obsidian {
+            return Color.white.opacity(0.08)
         }
         return palette.well.opacity(0.85)
     }
 
     private func badgeForeground(isSelected: Bool, palette: NailPalette) -> Color {
-        if isSelected {
-            return palette.textPrimary
-        }
-        return palette.textSecondary
+        isSelected ? palette.primaryText(for: activeSegmentTone) : palette.secondaryText(for: tone)
     }
 }
 
 // MARK: - Circle Icon Button
+
+private struct NeuCircleIconButtonStyle: ButtonStyle {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    let isActive: Bool
+    let effectiveTone: NeuTone
+    let isHovered: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        let palette = NailPalette(scheme: colorScheme)
+        let pressed = configuration.isPressed && isEnabled
+
+        configuration.label
+            .background {
+                if isActive {
+                    let activeTone: NeuTone = effectiveTone == .obsidian ? .porcelain : .obsidian
+                    NeuRaisedBackground(
+                        isCapsule: true,
+                        elevation: pressed ? 0.45 : (isHovered ? 0.80 : 0.65),
+                        isPressed: pressed,
+                        tone: activeTone
+                    )
+                } else {
+                    NeuRaisedBackground(
+                        isCapsule: true,
+                        elevation: isHovered ? 0.65 : 0.50,
+                        isPressed: pressed,
+                        tone: effectiveTone
+                    )
+                }
+            }
+            .scaleEffect(pressed && !reduceMotion ? 0.94 : (isHovered && !reduceMotion ? 1.03 : 1.0))
+            .opacity(isEnabled ? 1.0 : 0.45)
+            .animation(
+                reduceMotion ? nil : .spring(response: 0.22, dampingFraction: 0.76),
+                value: pressed
+            )
+    }
+}
 
 struct TalmoCircleIconButton: View {
     @Environment(\.colorScheme) private var colorScheme
@@ -1160,6 +1520,7 @@ struct TalmoCircleIconButton: View {
     var badgeText: String? = nil
     var dotColor: Color? = nil
     var onInk: Bool = false
+    var tone: NeuTone? = nil
     var size: CGFloat = 34
     var helpText: String = ""
     var action: () -> Void
@@ -1170,6 +1531,7 @@ struct TalmoCircleIconButton: View {
         badgeText: String? = nil,
         dotColor: Color? = nil,
         onInk: Bool = false,
+        tone: NeuTone? = nil,
         size: CGFloat = 34,
         helpText: String = "",
         action: @escaping () -> Void
@@ -1179,6 +1541,7 @@ struct TalmoCircleIconButton: View {
         self.badgeText = badgeText
         self.dotColor = dotColor
         self.onInk = onInk
+        self.tone = tone
         self.size = size
         self.helpText = helpText
         self.action = action
@@ -1186,56 +1549,48 @@ struct TalmoCircleIconButton: View {
 
     var body: some View {
         let palette = NailPalette(scheme: colorScheme)
+        let effectiveTone: NeuTone = tone ?? (onInk ? .obsidian : .porcelain)
 
         Button(action: action) {
-            ZStack {
-                Circle()
-                    .fill(circleFill(palette: palette))
-                    .shadow(
-                        color: onInk
-                            ? .clear
-                            : (palette.isDark ? Color.black.opacity(0.28) : Color(hex: 0x0F172A, alpha: 0.06)),
-                        radius: 4,
-                        x: 0,
-                        y: 1.5
-                    )
-                    .overlay {
+            Image(systemName: systemImage)
+                .font(.system(size: size * 0.41, weight: .semibold))
+                .foregroundStyle(iconForeground(palette: palette, tone: effectiveTone))
+                .frame(width: size, height: size)
+                .overlay(alignment: .topTrailing) {
+                    if let badgeText, !badgeText.isEmpty {
+                        Text(badgeText)
+                            .font(.system(size: 9.5, weight: .bold, design: .rounded))
+                            .foregroundStyle(effectiveTone == .obsidian ? Color(hex: 0x0A0A0A) : palette.accentInk)
+                            .padding(.horizontal, 4.5)
+                            .padding(.vertical, 1.5)
+                            .background {
+                                Capsule(style: .continuous)
+                                    .fill(effectiveTone == .obsidian ? palette.inkCardFill : palette.accent)
+                            }
+                            .offset(x: 4, y: -3)
+                    } else if let dotColor {
                         Circle()
-                            .strokeBorder(circleBorder(palette: palette), lineWidth: 1)
+                            .fill(dotColor)
+                            .frame(width: 8, height: 8)
+                            .overlay {
+                                Circle()
+                                    .strokeBorder(
+                                        effectiveTone == .obsidian ? palette.inkCard : palette.card,
+                                        lineWidth: 1.5
+                                    )
+                            }
+                            .offset(x: 1, y: -1)
                     }
-
-                Image(systemName: systemImage)
-                    .font(.system(size: size * 0.41, weight: .semibold))
-                    .foregroundStyle(iconForeground(palette: palette))
-            }
-            .frame(width: size, height: size)
-            .scaleEffect(isHovered && !reduceMotion ? 1.03 : 1.0)
-            .overlay(alignment: .topTrailing) {
-                if let badgeText, !badgeText.isEmpty {
-                    Text(badgeText)
-                        .font(.system(size: 9.5, weight: .bold, design: .rounded))
-                        .foregroundStyle(onInk ? Color(hex: 0x0A0A0A) : palette.accentInk)
-                        .padding(.horizontal, 4.5)
-                        .padding(.vertical, 1.5)
-                        .background {
-                            Capsule(style: .continuous)
-                                .fill(onInk ? palette.inkCardFill : palette.accent)
-                        }
-                        .offset(x: 4, y: -3)
-                } else if let dotColor {
-                    Circle()
-                        .fill(dotColor)
-                        .frame(width: 8, height: 8)
-                        .overlay {
-                            Circle()
-                                .strokeBorder(onInk ? palette.inkCard : palette.card, lineWidth: 1.5)
-                        }
-                        .offset(x: 1, y: -1)
                 }
-            }
-            .contentShape(Circle())
+                .contentShape(Circle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(
+            NeuCircleIconButtonStyle(
+                isActive: isActive,
+                effectiveTone: effectiveTone,
+                isHovered: isHovered
+            )
+        )
         .onHover { hovering in
             if reduceMotion {
                 isHovered = hovering
@@ -1248,37 +1603,11 @@ struct TalmoCircleIconButton: View {
         .help(helpText)
     }
 
-    private func circleFill(palette: NailPalette) -> AnyShapeStyle {
-        if onInk {
-            if isActive {
-                return AnyShapeStyle(palette.inkCardFill)
-            }
-            return AnyShapeStyle(isHovered ? Color.white.opacity(0.14) : palette.inkCardSurface)
-        }
+    private func iconForeground(palette: NailPalette, tone: NeuTone) -> Color {
         if isActive {
-            return AnyShapeStyle(palette.accent)
+            return tone == .obsidian ? Color(hex: 0x0A0A0A) : palette.inkCardText
         }
-        return AnyShapeStyle(
-            palette.isDark
-                ? (isHovered ? palette.accentSoft : palette.raised)
-                : (isHovered ? palette.accentSoft : Color.white)
-        )
-    }
-
-    private func circleBorder(palette: NailPalette) -> Color {
-        if onInk {
-            return isActive ? Color.clear : (isHovered ? Color.white.opacity(0.22) : palette.inkCardLine)
-        }
-        return isActive
-            ? Color.clear
-            : (isHovered ? palette.hairlineStrong : (palette.isDark ? palette.hairline : palette.hairlineStrong))
-    }
-
-    private func iconForeground(palette: NailPalette) -> Color {
-        if onInk {
-            return isActive ? Color(hex: 0x0A0A0A) : palette.inkCardText
-        }
-        return isActive ? palette.accentInk : palette.textPrimary
+        return palette.primaryText(for: tone)
     }
 }
 
@@ -1287,6 +1616,8 @@ struct TalmoCircleIconButton: View {
 enum NailPillVariant {
     case primary
     case secondary
+    case obsidian
+    case porcelain
     case inkPrimary
     case inkSecondary
     case inkDanger
@@ -1298,9 +1629,10 @@ enum NailPillVariant {
 struct NailPillButtonStyle: ButtonStyle {
     var variant: NailPillVariant = .secondary
     var compact: Bool = false
+    var tone: NeuTone? = nil
 
     func makeBody(configuration: Configuration) -> some View {
-        PillBody(configuration: configuration, variant: variant, compact: compact)
+        PillBody(configuration: configuration, variant: variant, compact: compact, tone: tone)
     }
 
     private struct PillBody: View {
@@ -1312,10 +1644,27 @@ struct NailPillButtonStyle: ButtonStyle {
         let configuration: Configuration
         let variant: NailPillVariant
         let compact: Bool
+        let tone: NeuTone?
 
         private var isPrimaryVariant: Bool {
-            if case .primary = variant { return true }
-            return false
+            switch variant {
+            case .primary, .obsidian, .porcelain, .inkPrimary:
+                return true
+            default:
+                return false
+            }
+        }
+
+        private var resolvedTone: NeuTone {
+            if let tone { return tone }
+            switch variant {
+            case .obsidian, .inkSecondary, .inkDanger:
+                return .obsidian
+            case .porcelain, .inkPrimary:
+                return .porcelain
+            default:
+                return .porcelain
+            }
         }
 
         var body: some View {
@@ -1329,7 +1678,7 @@ struct NailPillButtonStyle: ButtonStyle {
                 .background {
                     backgroundShape(palette: palette)
                 }
-                .opacity(isEnabled ? (configuration.isPressed ? 0.88 : 1.0) : (isPrimaryVariant ? 1.0 : 0.42))
+                .opacity(isEnabled ? (configuration.isPressed ? 0.92 : 1.0) : (isPrimaryVariant ? 0.72 : 0.48))
                 .scaleEffect(configuration.isPressed && !reduceMotion ? 0.97 : 1.0)
                 .animation(
                     reduceMotion ? nil : .spring(response: 0.22, dampingFraction: 0.72),
@@ -1349,11 +1698,17 @@ struct NailPillButtonStyle: ButtonStyle {
         private func foregroundColor(palette: NailPalette) -> Color {
             switch variant {
             case .primary:
-                return isEnabled ? palette.accentInk : palette.textTertiary
+                guard isEnabled else { return palette.textTertiary }
+                if let tone {
+                    return tone == .obsidian ? Color(hex: 0x0A0A0A) : palette.inkCardText
+                }
+                return palette.accentInk
+            case .obsidian:
+                return isEnabled ? palette.inkCardText : palette.inkCardMuted
+            case .porcelain, .inkPrimary:
+                return isEnabled ? Color(hex: 0x161B26) : Color(hex: 0x7A8496)
             case .secondary, .ghost:
-                return palette.textPrimary
-            case .inkPrimary:
-                return Color(hex: 0x0A0A0A)
+                return palette.primaryText(for: resolvedTone)
             case .inkSecondary:
                 return palette.inkCardText
             case .inkDanger:
@@ -1367,112 +1722,85 @@ struct NailPillButtonStyle: ButtonStyle {
 
         @ViewBuilder
         private func backgroundShape(palette: NailPalette) -> some View {
-            let cornerRadius: CGFloat = compact ? 11 : 14
+            let pressed = configuration.isPressed && isEnabled
+            let baseElevation: CGFloat = compact ? 0.65 : 0.85
 
             switch variant {
             case .primary:
                 if isEnabled {
-                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .fill(
-                            palette.isDark
-                                ? (isHovered ? Color.white : Color(hex: 0xF8FAFC))
-                                : (isHovered ? Color(hex: 0x1E1F23) : Color(hex: 0x111113))
-                        )
-                        .shadow(
-                            color: palette.isDark
-                                ? Color.black.opacity(0.32)
-                                : Color(hex: 0x0F172A, alpha: 0.16),
-                            radius: compact ? 4 : 7,
-                            x: 0,
-                            y: compact ? 2 : 3
-                        )
-                        .overlay {
-                            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                                .strokeBorder(
-                                    Color.white.opacity(palette.isDark ? 0.35 : 0.12),
-                                    lineWidth: 1
-                                )
-                        }
+                    let contrastTone: NeuTone = if let tone {
+                        tone == .obsidian ? .porcelain : .obsidian
+                    } else {
+                        palette.isDark ? .porcelain : .obsidian
+                    }
+                    NeuRaisedBackground(
+                        isCapsule: true,
+                        elevation: isHovered && !pressed ? baseElevation * 1.15 : baseElevation,
+                        isPressed: pressed,
+                        tone: contrastTone
+                    )
                 } else {
-                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .fill(palette.isDark ? Color(hex: 0x252A36) : Color(hex: 0xE5E7EB))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                                .strokeBorder(
-                                    palette.isDark ? palette.hairline : palette.hairlineStrong,
-                                    lineWidth: 1
-                                )
-                        }
+                    NeuInsetBackground(isCapsule: true, depth: 0.65, tone: resolvedTone)
                 }
 
+            case .obsidian, .inkSecondary:
+                NeuRaisedBackground(
+                    isCapsule: true,
+                    elevation: isHovered && !pressed ? baseElevation * 1.12 : baseElevation,
+                    isPressed: pressed,
+                    tone: .obsidian
+                )
+
+            case .porcelain, .inkPrimary:
+                NeuRaisedBackground(
+                    isCapsule: true,
+                    elevation: isHovered && !pressed ? baseElevation * 1.12 : baseElevation,
+                    isPressed: pressed,
+                    tone: .porcelain
+                )
+
             case .secondary:
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(
-                        palette.isDark
-                            ? (isHovered && isEnabled ? palette.accentSoft : palette.raised)
-                            : (isHovered && isEnabled ? palette.cardSecondary : Color.white)
-                    )
-                    .shadow(
-                        color: Color(hex: 0x0F172A, alpha: palette.isDark ? 0.28 : 0.045),
-                        radius: compact ? 3 : 5,
-                        x: 0,
-                        y: 1.5
-                    )
-                    .overlay {
-                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                            .strokeBorder(palette.hairlineStrong, lineWidth: 1)
-                    }
-
-            case .inkPrimary:
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(palette.inkCardFill)
-
-            case .inkSecondary:
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(Color.white.opacity(isHovered ? 0.14 : 0.10))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                            .strokeBorder(palette.inkCardLine, lineWidth: 1)
-                    }
+                NeuRaisedBackground(
+                    isCapsule: true,
+                    elevation: isHovered && !pressed ? baseElevation * 1.12 : baseElevation,
+                    isPressed: pressed,
+                    tone: resolvedTone
+                )
 
             case .inkDanger:
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(Color(hex: 0xF08A80).opacity(isHovered ? 0.24 : 0.18))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                            .strokeBorder(Color(hex: 0xF08A80).opacity(0.38), lineWidth: 1)
-                    }
+                NeuRaisedBackground(
+                    isCapsule: true,
+                    elevation: compact ? 0.55 : 0.75,
+                    isPressed: pressed,
+                    tint: Color(hex: 0xF08A80),
+                    tone: .obsidian
+                )
 
             case .danger:
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(
-                        isHovered && isEnabled
-                            ? palette.bad.opacity(palette.isDark ? 0.22 : 0.16)
-                            : palette.badSoft
-                    )
-                    .overlay {
-                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                            .strokeBorder(
-                                palette.bad.opacity(isHovered && isEnabled ? 0.48 : 0.32),
-                                lineWidth: 1
-                            )
-                    }
+                NeuRaisedBackground(
+                    isCapsule: true,
+                    elevation: compact ? 0.55 : 0.75,
+                    isPressed: pressed,
+                    tint: palette.bad,
+                    tone: resolvedTone
+                )
 
             case .ghost:
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(isHovered ? palette.hairline : Color.clear)
-                    .overlay {
-                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                            .strokeBorder(palette.hairlineStrong, lineWidth: 1)
-                    }
+                NeuRaisedBackground(
+                    isCapsule: true,
+                    elevation: isHovered ? 0.50 : 0.30,
+                    isPressed: pressed,
+                    tone: resolvedTone
+                )
 
             case .tinted(let color):
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(color.opacity(palette.isDark ? 0.16 : 0.12))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                            .strokeBorder(color.opacity(isHovered ? 0.45 : 0.32), lineWidth: 1)
-                    }
+                NeuRaisedBackground(
+                    isCapsule: true,
+                    elevation: compact ? 0.55 : 0.75,
+                    isPressed: pressed,
+                    tint: color,
+                    tone: resolvedTone
+                )
             }
         }
     }
@@ -1779,11 +2107,26 @@ struct NailStatusBadge: View {
     var icon: String? = nil
     var pulse: Bool = false
     var onInk: Bool = false
+    var tone: NeuTone? = nil
+
+    init(
+        text: String,
+        color: Color,
+        icon: String? = nil,
+        pulse: Bool = false,
+        onInk: Bool = false,
+        tone: NeuTone? = nil
+    ) {
+        self.text = text
+        self.color = color
+        self.icon = icon
+        self.pulse = pulse
+        self.onInk = onInk
+        self.tone = tone
+    }
 
     var body: some View {
-        let palette = NailPalette(scheme: colorScheme)
-        let bgOpacity = (onInk || palette.isDark) ? 0.18 : 0.12
-        let borderOpacity = (onInk || palette.isDark) ? 0.34 : 0.28
+        let effectiveTone: NeuTone = tone ?? (onInk ? .obsidian : .porcelain)
 
         HStack(spacing: 5) {
             if let icon {
@@ -1808,12 +2151,15 @@ struct NailStatusBadge: View {
                 .lineLimit(1)
         }
         .foregroundStyle(color)
-        .padding(.horizontal, 8.5)
-        .padding(.vertical, 3.5)
-        .background(color.opacity(bgOpacity), in: Capsule(style: .continuous))
-        .overlay {
-            Capsule(style: .continuous)
-                .strokeBorder(color.opacity(borderOpacity), lineWidth: 0.8)
+        .padding(.horizontal, 9.5)
+        .padding(.vertical, 4)
+        .background {
+            NeuRaisedBackground(
+                isCapsule: true,
+                elevation: 0.42,
+                tint: color,
+                tone: effectiveTone
+            )
         }
         .onAppear {
             if pulse && !reduceMotion {
@@ -1831,12 +2177,28 @@ struct NailSectionTitle: View {
     var subtitle: String? = nil
     var icon: String? = nil
     var onInk: Bool = false
+    var tone: NeuTone? = nil
+
+    init(
+        title: String,
+        subtitle: String? = nil,
+        icon: String? = nil,
+        onInk: Bool = false,
+        tone: NeuTone? = nil
+    ) {
+        self.title = title
+        self.subtitle = subtitle
+        self.icon = icon
+        self.onInk = onInk
+        self.tone = tone
+    }
 
     var body: some View {
         let palette = NailPalette(scheme: colorScheme)
-        let titleColor = onInk ? palette.inkCardText : palette.textPrimary
-        let subtitleColor = onInk ? palette.inkCardMuted : palette.textSecondary
-        let iconColor = onInk ? palette.inkCardMuted : palette.textSecondary
+        let effectiveTone: NeuTone = tone ?? (onInk ? .obsidian : .porcelain)
+        let titleColor = palette.primaryText(for: effectiveTone)
+        let subtitleColor = palette.secondaryText(for: effectiveTone)
+        let iconColor = palette.secondaryText(for: effectiveTone)
 
         HStack(spacing: 8) {
             if let icon {
@@ -1855,6 +2217,386 @@ struct NailSectionTitle: View {
                 }
             }
         }
+    }
+}
+
+// MARK: - Reusable Neumorphic Input, Picker, Chip, Row & Slider Helpers
+
+/// Tactile concave neumorphic text field style supporting porcelain and obsidian surfaces.
+struct NeuTextFieldStyle: TextFieldStyle {
+    @Environment(\.colorScheme) private var colorScheme
+    var tone: NeuTone = .porcelain
+    var cornerRadius: CGFloat = 12
+    var horizontalPadding: CGFloat = 12
+    var verticalPadding: CGFloat = 8
+    var isFocused: Bool = false
+
+    func _body(configuration: TextField<Self._Label>) -> some View {
+        let palette = NailPalette(scheme: colorScheme)
+        configuration
+            .textFieldStyle(.plain)
+            .foregroundStyle(palette.primaryText(for: tone))
+            .padding(.horizontal, horizontalPadding)
+            .padding(.vertical, verticalPadding)
+            .background {
+                NeuInsetBackground(cornerRadius: cornerRadius, depth: 0.9, tone: tone)
+            }
+            .overlay {
+                if isFocused {
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .strokeBorder(
+                            (tone == .obsidian ? palette.inkCardFill : palette.accent).opacity(0.45),
+                            lineWidth: 1.1
+                        )
+                        .allowsHitTesting(false)
+                }
+            }
+    }
+}
+
+/// Sculpted raised neumorphic dropdown/menu trigger label with trailing chevron.
+struct NeuMenuLabel: View {
+    @Environment(\.colorScheme) private var colorScheme
+    var title: String
+    var systemImage: String? = nil
+    var tone: NeuTone = .porcelain
+    var compact: Bool = false
+
+    init(
+        _ title: String,
+        systemImage: String? = nil,
+        tone: NeuTone = .porcelain,
+        compact: Bool = false
+    ) {
+        self.title = title
+        self.systemImage = systemImage
+        self.tone = tone
+        self.compact = compact
+    }
+
+    var body: some View {
+        let palette = NailPalette(scheme: colorScheme)
+        HStack(spacing: 6) {
+            if let systemImage {
+                Image(systemName: systemImage)
+                    .font(.system(size: compact ? 11 : 12.5, weight: .semibold))
+                    .foregroundStyle(palette.secondaryText(for: tone))
+            }
+            Text(title)
+                .font(compact ? .caption.weight(.semibold) : .callout.weight(.semibold))
+                .foregroundStyle(palette.primaryText(for: tone))
+                .lineLimit(1)
+            Image(systemName: "chevron.up.chevron.down")
+                .font(.system(size: compact ? 9 : 10, weight: .bold))
+                .foregroundStyle(palette.secondaryText(for: tone))
+        }
+        .padding(.horizontal, compact ? 10 : 14)
+        .padding(.vertical, compact ? 6 : 8)
+        .background {
+            NeuRaisedBackground(
+                cornerRadius: compact ? 10 : 12,
+                elevation: compact ? 0.50 : 0.65,
+                tone: tone
+            )
+        }
+    }
+}
+
+/// Tactile neumorphic chip/tag that switches between raised and concave inset states.
+struct NeuChip: View {
+    @Environment(\.colorScheme) private var colorScheme
+    var title: String
+    var systemImage: String? = nil
+    var isSelected: Bool = false
+    var tone: NeuTone = .porcelain
+    var tint: Color? = nil
+    var action: (() -> Void)? = nil
+
+    init(
+        _ title: String,
+        systemImage: String? = nil,
+        isSelected: Bool = false,
+        tone: NeuTone = .porcelain,
+        tint: Color? = nil,
+        action: (() -> Void)? = nil
+    ) {
+        self.title = title
+        self.systemImage = systemImage
+        self.isSelected = isSelected
+        self.tone = tone
+        self.tint = tint
+        self.action = action
+    }
+
+    var body: some View {
+        let palette = NailPalette(scheme: colorScheme)
+        let effectiveTone: NeuTone = isSelected ? (tone == .obsidian ? .porcelain : .obsidian) : tone
+        let label = HStack(spacing: 5) {
+            if let systemImage {
+                Image(systemName: systemImage)
+                    .font(.caption2.weight(.semibold))
+            }
+            Text(title)
+                .font(.caption.weight(isSelected ? .bold : .semibold))
+                .lineLimit(1)
+        }
+        .foregroundStyle(tint ?? palette.primaryText(for: effectiveTone))
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background {
+            NeuRaisedBackground(
+                isCapsule: true,
+                elevation: isSelected ? 0.55 : 0.45,
+                isPressed: isSelected,
+                tint: tint,
+                tone: effectiveTone
+            )
+        }
+
+        if let action {
+            Button(action: action) {
+                label
+            }
+            .buttonStyle(.plain)
+        } else {
+            label
+        }
+    }
+}
+
+private struct NeuListRowModifier: ViewModifier {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isHovered = false
+
+    let isSelected: Bool
+    let tone: NeuTone
+    let cornerRadius: CGFloat
+    let horizontalPadding: CGFloat
+    let verticalPadding: CGFloat
+
+    func body(content: Content) -> some View {
+        content
+            .padding(.horizontal, horizontalPadding)
+            .padding(.vertical, verticalPadding)
+            .background {
+                if isSelected {
+                    NeuInsetBackground(
+                        cornerRadius: cornerRadius,
+                        depth: 0.78,
+                        tone: tone
+                    )
+                } else {
+                    NeuRaisedBackground(
+                        cornerRadius: cornerRadius,
+                        elevation: isHovered ? 0.60 : 0.36,
+                        tone: tone
+                    )
+                }
+            }
+            .onHover { hovering in
+                if reduceMotion {
+                    isHovered = hovering
+                } else {
+                    withAnimation(.easeOut(duration: 0.15)) {
+                        isHovered = hovering
+                    }
+                }
+            }
+    }
+}
+
+/// Concave neumorphic progress track with sculpted inner fill bar.
+struct NeuProgressTrack: View {
+    @Environment(\.colorScheme) private var colorScheme
+    var progress: Double
+    var tone: NeuTone = .porcelain
+    var height: CGFloat = 8
+    var tint: Color? = nil
+
+    init(
+        progress: Double,
+        tone: NeuTone = .porcelain,
+        height: CGFloat = 8,
+        tint: Color? = nil
+    ) {
+        self.progress = progress
+        self.tone = tone
+        self.height = height
+        self.tint = tint
+    }
+
+    var body: some View {
+        let palette = NailPalette(scheme: colorScheme)
+        let clamped = min(max(progress, 0), 1)
+        let fillColor = tint ?? (tone == .obsidian ? palette.inkCardFill : palette.accent)
+
+        GeometryReader { geo in
+            let fillWidth = max(clamped > 0 ? height : 0, geo.size.width * clamped)
+            ZStack(alignment: .leading) {
+                NeuInsetBackground(isCapsule: true, depth: 0.85, tone: tone)
+
+                if clamped > 0 {
+                    Capsule(style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [fillColor, fillColor.opacity(0.82)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .frame(width: fillWidth, height: max(height - 2, 2))
+                        .padding(.horizontal, 1)
+                        .shadow(color: fillColor.opacity(0.32), radius: 2, x: 0, y: 1)
+                }
+            }
+        }
+        .frame(height: height)
+    }
+}
+
+/// Interactive tactile neumorphic slider with concave track and floating sculpted thumb.
+struct NeuSlider: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.isEnabled) private var isEnabled
+
+    @Binding var value: Double
+    var range: ClosedRange<Double> = 0...1
+    var step: Double? = nil
+    var tone: NeuTone = .porcelain
+    var tint: Color? = nil
+
+    init(
+        value: Binding<Double>,
+        in range: ClosedRange<Double> = 0...1,
+        step: Double? = nil,
+        tone: NeuTone = .porcelain,
+        tint: Color? = nil
+    ) {
+        self._value = value
+        self.range = range
+        self.step = step
+        self.tone = tone
+        self.tint = tint
+    }
+
+    var body: some View {
+        let palette = NailPalette(scheme: colorScheme)
+        let span = max(range.upperBound - range.lowerBound, 0.0001)
+        let normalized = min(max((value - range.lowerBound) / span, 0), 1)
+        let fillColor = tint ?? (tone == .obsidian ? palette.inkCardFill : palette.accent)
+        let thumbSize: CGFloat = 18
+
+        GeometryReader { geo in
+            let usableWidth = max(geo.size.width - thumbSize, 1)
+            let thumbX = usableWidth * normalized
+
+            ZStack(alignment: .leading) {
+                NeuInsetBackground(isCapsule: true, depth: 0.85, tone: tone)
+                    .frame(height: 8)
+
+                Capsule(style: .continuous)
+                    .fill(fillColor)
+                    .frame(width: max(8, thumbX + thumbSize * 0.5), height: 6)
+                    .padding(.leading, 1)
+
+                Circle()
+                    .fill(
+                        LinearGradient(
+                            colors: [Color.white, Color(hex: 0xE6ECF5)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .frame(width: thumbSize, height: thumbSize)
+                    .overlay {
+                        Circle()
+                            .strokeBorder(Color.white.opacity(0.95), lineWidth: 0.8)
+                    }
+                    .shadow(color: palette.shadowDark(for: tone), radius: 3, x: 1.5, y: 2)
+                    .offset(x: thumbX)
+            }
+            .frame(height: 22)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { drag in
+                        guard isEnabled else { return }
+                        let pct = min(max((drag.location.x - thumbSize * 0.5) / usableWidth, 0), 1)
+                        var next = range.lowerBound + pct * span
+                        if let step, step > 0 {
+                            next = (next / step).rounded() * step
+                        }
+                        value = min(max(next, range.lowerBound), range.upperBound)
+                    }
+            )
+        }
+        .frame(height: 22)
+        .opacity(isEnabled ? 1.0 : 0.5)
+    }
+}
+
+extension View {
+    /// Wraps an input control in a sculpted concave neumorphic well.
+    func neuTextField(
+        tone: NeuTone = .porcelain,
+        cornerRadius: CGFloat = 12,
+        horizontalPadding: CGFloat = 12,
+        verticalPadding: CGFloat = 8,
+        isFocused: Bool = false
+    ) -> some View {
+        let paletteTone = tone
+        return self
+            .padding(.horizontal, horizontalPadding)
+            .padding(.vertical, verticalPadding)
+            .background {
+                NeuInsetBackground(cornerRadius: cornerRadius, depth: 0.9, tone: paletteTone)
+            }
+            .overlay {
+                if isFocused {
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .strokeBorder(
+                            (paletteTone == .obsidian ? Color(hex: 0xF4F6FA) : Color(hex: 0x1B2028)).opacity(0.45),
+                            lineWidth: 1.1
+                        )
+                        .allowsHitTesting(false)
+                }
+            }
+    }
+
+    /// Styles a picker or dropdown trigger with a raised neumorphic surface.
+    func neuPickerSurface(
+        tone: NeuTone = .porcelain,
+        cornerRadius: CGFloat = 12,
+        isCapsule: Bool = false,
+        elevation: CGFloat = 0.60
+    ) -> some View {
+        self.background {
+            NeuRaisedBackground(
+                cornerRadius: cornerRadius,
+                isCapsule: isCapsule,
+                elevation: elevation,
+                tone: tone
+            )
+        }
+    }
+
+    /// Styles a list or sidebar row with tactile neumorphic raised/inset depth.
+    func neuListRow(
+        isSelected: Bool = false,
+        tone: NeuTone = .porcelain,
+        cornerRadius: CGFloat = 14,
+        horizontalPadding: CGFloat = 12,
+        verticalPadding: CGFloat = 9
+    ) -> some View {
+        modifier(
+            NeuListRowModifier(
+                isSelected: isSelected,
+                tone: tone,
+                cornerRadius: cornerRadius,
+                horizontalPadding: horizontalPadding,
+                verticalPadding: verticalPadding
+            )
+        )
     }
 }
 

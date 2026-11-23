@@ -136,6 +136,11 @@ private struct VoiceResultPayload: Decodable {
     let latencyMs: Double?
 }
 
+struct LiveVoiceTranscript: Decodable, Equatable {
+    var heard: String?
+    var reply: String?
+}
+
 private struct MeetingLinePayload: Decodable {
     let text: String
     let speaker: String?
@@ -181,6 +186,7 @@ final class MeetSession {
     }
     private(set) var voiceTranscript = ""
     private(set) var voiceReply = ""
+    private(set) var liveVoice = LiveVoiceTranscript()
     private(set) var lastHeardAt: Date?
     private(set) var lastReplyAt: Date?
     private(set) var lastLatencySeconds: Double?
@@ -523,6 +529,7 @@ final class MeetSession {
         input = commands.fileHandleForWriting
         voiceTranscript = ""
         voiceReply = ""
+        liveVoice = LiveVoiceTranscript()
         lastHeardAt = nil
         lastReplyAt = nil
         lastLatencySeconds = nil
@@ -567,6 +574,19 @@ final class MeetSession {
     }
 
     private func receive(_ event: String) {
+        if event.hasPrefix("voice-preview ") {
+            if let update = try? JSONDecoder().decode(
+                LiveVoiceTranscript.self,
+                from: Data(event.dropFirst("voice-preview ".count).utf8)
+            ) {
+                if let heard = update.heard { liveVoice.heard = heard }
+                if let reply = update.reply { liveVoice.reply = reply }
+            }
+            return
+        }
+        if event == "voice-preview-end" || event == "voice-interrupted" || event.hasPrefix("voice-result ") {
+            liveVoice = LiveVoiceTranscript()
+        }
         if event.hasPrefix("avatar-state ") {
             struct Payload: Decodable {
                 let revision: UInt32
@@ -905,6 +925,7 @@ final class MeetSession {
         voiceReady = false
         voiceBusy = false
         isSpeaking = false
+        liveVoice = LiveVoiceTranscript()
         persistNotulen(
             endedAt: Date(),
             interrupted: Self.shouldMarkNotulenInterrupted(

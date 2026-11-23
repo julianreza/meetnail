@@ -1,43 +1,333 @@
 import AppKit
 import SwiftUI
 
-private struct HUDMorphShape: Shape {
-    var topFlare: CGFloat
-    var topRadius: CGFloat
-    var bottomRadius: CGFloat
+private struct HUDLiquidMorphStage: View, @MainActor Animatable {
+    var morphProgress: CGFloat
 
-    var animatableData: AnimatablePair<CGFloat, AnimatablePair<CGFloat, CGFloat>> {
-        get {
-            AnimatablePair(topFlare, AnimatablePair(topRadius, bottomRadius))
-        }
-        set {
-            topFlare = newValue.first
-            topRadius = newValue.second.first
-            bottomRadius = newValue.second.second
-        }
+    let stageWidth: CGFloat
+    let stageHeight: CGFloat
+    let rowHeight: CGFloat
+    let topPad: CGFloat
+    let side: CGFloat
+    let owlSize: CGFloat
+    let isFloating: Bool
+    let isHardwareNotch: Bool
+    let hardwareNotchWidth: CGFloat
+    let collapsedSize: CGSize
+    let mood: NailBotMood
+    let phase: Double
+    let speakingEnergy: Double
+    let listeningEnergy: Double
+    let accentColor: Color
+    let hudOpacity: Double
+    let isPaused: Bool
+    let reduceMotion: Bool
+
+    var animatableData: CGFloat {
+        get { morphProgress }
+        set { morphProgress = newValue }
     }
 
-    func path(in rect: CGRect) -> Path {
-        guard rect.width > 1, rect.height > 1 else {
-            return Path(rect)
+    var body: some View {
+        let effectiveProgress = reduceMotion ? (morphProgress >= 0.5 ? 1.0 : 0.0) : morphProgress
+        let t = HUDMorphMath.clamp01(effectiveProgress)
+        let shapeT = HUDMorphMath.smoothstep(t, edge0: 0.08, edge1: 0.92)
+
+        let collapsedOrigin = CGPoint(
+            x: isHardwareNotch
+                ? (stageWidth * 0.5 + hardwareNotchWidth * 0.5 + 23)
+                : (stageWidth * 0.5),
+            y: rowHeight * 0.5
+        )
+        let expandedOrigin = CGPoint(
+            x: stageWidth * 0.5,
+            y: topPad + side * 0.5
+        )
+
+        let controlPoint = CGPoint(
+            x: isHardwareNotch
+                ? (collapsedOrigin.x * 0.85 + expandedOrigin.x * 0.15)
+                : expandedOrigin.x,
+            y: HUDMorphMath.lerp(
+                collapsedOrigin.y,
+                expandedOrigin.y,
+                t: isHardwareNotch ? 0.68 : 0.55
+            )
+        )
+
+        let inv = 1.0 - t
+        let bx = inv * inv * collapsedOrigin.x + 2.0 * inv * t * controlPoint.x + t * t * expandedOrigin.x
+        let by = inv * inv * collapsedOrigin.y + 2.0 * inv * t * controlPoint.y + t * t * expandedOrigin.y
+        let overshootY = reduceMotion ? 0 : max(0, effectiveProgress - 1.0) * (expandedOrigin.y - collapsedOrigin.y) * 0.36
+        let center = CGPoint(x: bx, y: by + overshootY)
+
+        let morphPillCollapsedSize = isHardwareNotch
+            ? CGSize(width: 46, height: rowHeight)
+            : collapsedSize
+        let shellSize = HUDMorphMath.morphShellDimensions(
+            progress: t,
+            collapsedSize: morphPillCollapsedSize,
+            expandedOwlSize: owlSize
+        )
+        let squash = reduceMotion ? CGSize(width: 1.0, height: 1.0) : HUDMorphMath.squashStretch(progress: t)
+
+        let restChromeAlpha = 1.0 - HUDMorphMath.smoothstep(t, edge0: 0.0, edge1: 0.10)
+        let notchEarAlpha = 1.0 - HUDMorphMath.smoothstep(t, edge0: 0.0, edge1: 0.35)
+        let shellFadeIn: CGFloat = isHardwareNotch
+            ? HUDMorphMath.smoothstep(t, edge0: 0.0, edge1: 0.08)
+            : (t > 0.001 ? 1.0 : 0.0)
+        let shellFadeOut = 1.0 - HUDMorphMath.smoothstep(t, edge0: 0.68, edge1: 0.96)
+        let shellOpacity = shellFadeIn * shellFadeOut
+
+        let porcelainMix = HUDMorphMath.smoothstep(t, edge0: 0.22, edge1: 0.72)
+        let midPulse = sin(t * .pi)
+
+        let bloomIn = HUDMorphMath.smoothstep(t, edge0: 0.25, edge1: 0.54)
+        let bloomOut = 1.0 - HUDMorphMath.smoothstep(t, edge0: 0.56, edge1: 0.90)
+        let bloomAlpha = bloomIn * bloomOut
+
+        let eyeFadeOut = 1.0 - HUDMorphMath.smoothstep(t, edge0: 0.44, edge1: 0.64)
+        let eyeGrow = HUDMorphMath.smoothstep(t, edge0: 0.0, edge1: 0.62)
+        let owlScale = owlSize / 48.0
+        let targetEyeScale = max(1.0, owlScale / (15.0 / 14.0))
+        let currentEyeScale = HUDMorphMath.lerp(1.0, targetEyeScale, t: eyeGrow)
+        let visorOffsetY = HUDMorphMath.lerp(0, -2.4 * owlScale, t: eyeGrow)
+        let visorReveal = HUDMorphMath.smoothstep(t, edge0: 0.20, edge1: 0.58)
+        let visorW = HUDMorphMath.lerp(28, 32.2 * owlScale, t: eyeGrow)
+        let visorH = HUDMorphMath.lerp(15, 14.2 * owlScale, t: eyeGrow)
+
+        let owlReveal = reduceMotion
+            ? (t >= 0.5 ? 1.0 : 0.0)
+            : HUDMorphMath.smoothstep(t, edge0: 0.48, edge1: 0.88)
+
+        ZStack(alignment: .topLeading) {
+            if isHardwareNotch {
+                if notchEarAlpha > 0.001 {
+                    Color.black
+                        .frame(width: hardwareNotchWidth + 46, height: rowHeight)
+                        .clipShape(
+                            UnevenRoundedRectangle(
+                                topLeadingRadius: 0,
+                                bottomLeadingRadius: 12,
+                                bottomTrailingRadius: 12,
+                                topTrailingRadius: 0,
+                                style: .continuous
+                            )
+                        )
+                        .opacity(notchEarAlpha)
+                        .position(x: stageWidth * 0.5 + 23, y: rowHeight * 0.5)
+                }
+            } else if restChromeAlpha > 0.001 {
+                let restShape = isFloating
+                    ? HUDMorphShellShape(topFlare: 0, topRadius: 18, bottomRadius: 18)
+                    : HUDMorphShellShape(topFlare: 8, topRadius: 0, bottomRadius: 12)
+                ZStack {
+                    restShape
+                        .fill(
+                            LinearGradient(
+                                stops: [
+                                    .init(color: Color(hex: 0x181B22).opacity(hudOpacity), location: 0.0),
+                                    .init(color: Color(hex: 0x0C0D11).opacity(hudOpacity), location: 0.55),
+                                    .init(color: Color(hex: 0x060709).opacity(hudOpacity), location: 1.0),
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                    restShape
+                        .stroke(
+                            LinearGradient(
+                                colors: [
+                                    Color.white.opacity(0.22),
+                                    Color.white.opacity(0.06),
+                                    Color.black.opacity(0.45),
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            lineWidth: 1.0
+                        )
+                }
+                .frame(width: collapsedSize.width, height: collapsedSize.height)
+                .shadow(
+                    color: isFloating ? Color.white.opacity(0.08 * hudOpacity) : .clear,
+                    radius: isFloating ? 3 : 0,
+                    x: -1.5,
+                    y: -1.5
+                )
+                .shadow(
+                    color: isFloating ? Color.black.opacity(0.55 * hudOpacity) : .clear,
+                    radius: isFloating ? 7 : 0,
+                    x: 2,
+                    y: 4
+                )
+                .opacity(restChromeAlpha)
+                .position(x: collapsedOrigin.x, y: collapsedOrigin.y)
+            }
+
+            if bloomAlpha > 0.001 && !reduceMotion {
+                let bloomScale = HUDMorphMath.lerp(
+                    0.88,
+                    1.38,
+                    t: HUDMorphMath.smoothstep(t, edge0: 0.25, edge1: 0.90)
+                )
+                ZStack {
+                    Circle()
+                        .fill(
+                            RadialGradient(
+                                colors: [
+                                    accentColor.opacity(0.24 * bloomAlpha),
+                                    Color(hex: 0xF2C94C).opacity(0.08 * bloomAlpha),
+                                    Color.clear,
+                                ],
+                                center: .center,
+                                startRadius: shellSize.width * 0.18,
+                                endRadius: shellSize.width * 0.78
+                            )
+                        )
+                        .frame(width: shellSize.width * 1.56, height: shellSize.height * 1.56)
+
+                    PillToOwlMorphShape(progress: shapeT)
+                        .stroke(accentColor.opacity(0.42 * bloomAlpha), lineWidth: 1.5)
+                        .frame(width: shellSize.width, height: shellSize.height)
+                        .scaleEffect(bloomScale)
+                }
+                .scaleEffect(x: squash.width, y: squash.height)
+                .position(x: center.x, y: center.y)
+            }
+
+            if shellOpacity > 0.001 && t > 0.001 {
+                let morphShape = PillToOwlMorphShape(progress: shapeT)
+                ZStack {
+                    // Sculpted obsidian capsule phase (#181B22 -> #060709 + specular rim)
+                    ZStack {
+                        morphShape
+                            .fill(
+                                LinearGradient(
+                                    stops: [
+                                        .init(color: Color(hex: 0x181B22), location: 0.0),
+                                        .init(color: Color(hex: 0x0C0D11), location: 0.55),
+                                        .init(color: Color(hex: 0x060709), location: 1.0),
+                                    ],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                        morphShape
+                            .stroke(
+                                LinearGradient(
+                                    colors: [
+                                        Color.white.opacity(0.24),
+                                        Color.white.opacity(0.07),
+                                        Color.black.opacity(0.42),
+                                    ],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                ),
+                                lineWidth: 1.0
+                            )
+                    }
+                    .opacity(1.0 - porcelainMix * 0.90)
+
+                    // Sculpted porcelain Noko-Owl transition phase (#FAFBFD -> #DAE3EE)
+                    ZStack {
+                        morphShape
+                            .fill(
+                                LinearGradient(
+                                    stops: [
+                                        .init(color: Color(hex: 0xFAFBFD), location: 0.0),
+                                        .init(color: Color(hex: 0xF3F6FA), location: 0.34),
+                                        .init(color: Color(hex: 0xECF0F5), location: 0.66),
+                                        .init(color: Color(hex: 0xDAE3EE), location: 1.0),
+                                    ],
+                                    startPoint: UnitPoint(x: 0.22, y: 0.10),
+                                    endPoint: UnitPoint(x: 0.86, y: 0.95)
+                                )
+                            )
+                        morphShape
+                            .stroke(
+                                LinearGradient(
+                                    colors: [
+                                        Color.white.opacity(0.92),
+                                        Color.white.opacity(0.40),
+                                        Color(hex: 0xB8C5D6, alpha: 0.65),
+                                    ],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                ),
+                                lineWidth: 1.0
+                            )
+                    }
+                    .opacity(porcelainMix)
+
+                    // Luminous mid-morph accent rim pulse
+                    morphShape
+                        .stroke(accentColor.opacity(0.45 * midPulse), lineWidth: 1.25)
+                        .shadow(color: accentColor.opacity(0.32 * midPulse), radius: 8.0 * midPulse)
+                        .opacity(midPulse)
+                }
+                .frame(width: shellSize.width, height: shellSize.height)
+                .scaleEffect(x: squash.width, y: squash.height)
+                .opacity(shellOpacity * hudOpacity)
+                .position(x: center.x, y: center.y)
+            }
+
+            if eyeFadeOut > 0.001 {
+                ZStack {
+                    if visorReveal > 0.001 && t > 0.001 {
+                        Capsule(style: .continuous)
+                            .fill(
+                                LinearGradient(
+                                    stops: [
+                                        .init(color: Color(hex: 0x171A21), location: 0.0),
+                                        .init(color: Color(hex: 0x0E1015), location: 0.50),
+                                        .init(color: Color(hex: 0x0A0A0A), location: 1.0),
+                                    ],
+                                    startPoint: .top,
+                                    endPoint: .bottom
+                                )
+                            )
+                            .frame(width: visorW, height: visorH)
+                            .opacity(visorReveal)
+                    }
+
+                    NailBotFaceView(
+                        mood: mood,
+                        form: .miniEyes,
+                        phase: phase,
+                        speakingEnergy: speakingEnergy,
+                        listeningEnergy: listeningEnergy,
+                        accentColor: accentColor,
+                        size: CGSize(width: 28, height: 15),
+                        isPaused: isPaused
+                    )
+                    .scaleEffect(currentEyeScale)
+                }
+                .offset(y: visorOffsetY)
+                .frame(width: shellSize.width, height: shellSize.height)
+                .clipShape(PillToOwlMorphShape(progress: shapeT))
+                .scaleEffect(x: squash.width, y: squash.height)
+                .opacity(eyeFadeOut * (t <= 0.001 ? 1.0 : hudOpacity))
+                .position(x: center.x, y: center.y)
+            }
+
+            if t > 0.001 || owlReveal > 0.001 {
+                NokoFloatingCompanionStage(
+                    mood: mood,
+                    phase: phase,
+                    speakingEnergy: speakingEnergy,
+                    listeningEnergy: listeningEnergy,
+                    accentColor: accentColor,
+                    owlSize: owlSize,
+                    isPaused: isPaused || t < 0.45
+                )
+                .frame(width: side, height: side)
+                .scaleEffect(x: squash.width, y: squash.height)
+                .opacity(owlReveal * hudOpacity)
+                .position(x: center.x, y: center.y)
+            }
         }
-        if topRadius > 0.5 && topFlare < 0.5 {
-            let corner = min(bottomRadius, rect.width * 0.5, rect.height * 0.5)
-            return RoundedRectangle(cornerRadius: corner, style: .continuous).path(in: rect)
-        }
-        let t = min(max(0, topFlare), rect.width * 0.25, rect.height * 0.35)
-        let b = min(max(4, bottomRadius), max(4, (rect.width - 2 * t) * 0.5), max(4, rect.height - t))
-        var path = Path()
-        path.move(to: CGPoint(x: 0, y: 0))
-        path.addQuadCurve(to: CGPoint(x: t, y: t), control: CGPoint(x: t, y: 0))
-        path.addLine(to: CGPoint(x: t, y: rect.height - b))
-        path.addQuadCurve(to: CGPoint(x: t + b, y: rect.height), control: CGPoint(x: t, y: rect.height))
-        path.addLine(to: CGPoint(x: rect.width - t - b, y: rect.height))
-        path.addQuadCurve(to: CGPoint(x: rect.width - t, y: rect.height - b), control: CGPoint(x: rect.width - t, y: rect.height))
-        path.addLine(to: CGPoint(x: rect.width - t, y: t))
-        path.addQuadCurve(to: CGPoint(x: rect.width, y: 0), control: CGPoint(x: rect.width - t, y: 0))
-        path.closeSubpath()
-        return path
+        .frame(width: stageWidth, height: stageHeight, alignment: .topLeading)
     }
 }
 
@@ -57,12 +347,17 @@ struct HUDView: View {
     @State private var recentReplyVisible = false
     @State private var replyHideTask: Task<Void, Never>?
 
+    @State private var morphProgress: CGFloat = 0
+    @State private var isStageExpanded = false
+    @State private var stageCollapseTask: Task<Void, Never>?
+    @State private var dockRevealed = false
+    @State private var dockMounted = false
+    @State private var dockUnmountTask: Task<Void, Never>?
+    @State private var dockRevealTask: Task<Void, Never>?
+
     // MARK: - Design #27 Obsidian Monochrome + Subtle Touch of Yellow Tokens
 
     private let obsidianSurface = Color(hex: 0x0A0A0A)
-    private let recessedSurface = Color(hex: 0x13161C)
-    private let alabasterInk = Color(hex: 0xF5F5F5)
-    private let mutedInk = Color(hex: 0x9CA3AF)
     private let dangerInk = Color(hex: 0xF08A80)
     private let goldBright = Color(hex: 0xEAB308)
     private let goldWarm = Color(hex: 0xF2C94C)
@@ -70,76 +365,87 @@ struct HUDView: View {
     var body: some View {
         let mode = metrics.displayMode
         let isFloating = settings.hudLayoutStyle == .floatingPill
+        let isHardwareNotch = !isFloating && metrics.hasHardwareNotch
         let isExpanded = (mode != .collapsed)
-        let shellWidth = cardWidth(for: mode)
-        let shellHeight = cardHeight(for: mode)
-        let morphShape = hudMorphShape(isFloating: isFloating, mode: mode)
-        let shellSpring: Animation? = reduceMotion
-            ? nil
-            : (isExpanded
-                ? .spring(response: 0.42, dampingFraction: 0.82, blendDuration: 0.12)
-                : .spring(response: 0.32, dampingFraction: 0.88, blendDuration: 0.08))
+        let rowHeight: CGFloat = isFloating ? 36 : metrics.notchHeight
+        let topPad: CGFloat = isHardwareNotch ? (metrics.notchHeight + 6) : 6
+        let side = HUDPanel.stageSide(for: settings.hudSize)
+        let owlSize = HUDPanel.owlSize(for: settings.hudSize)
+        let collapsedSize = HUDPanel.cardSize(for: .collapsed, metrics: metrics, settings: settings, meet: meet)
+
+        let activeStageExpanded = isExpanded || isStageExpanded
+        let stageWidth: CGFloat = activeStageExpanded
+            ? (isHardwareNotch ? max(side, collapsedSize.width) : side)
+            : collapsedSize.width
+        let stageHeight: CGFloat = activeStageExpanded
+            ? (topPad + side)
+            : collapsedSize.height
+        let showDockRow = activeStageExpanded && (mode == .commandTray || dockMounted)
 
         ZStack(alignment: .top) {
             ZStack(alignment: .top) {
-                collapsedStealthWings(isFloating: isFloating)
-                    .frame(width: cardWidth(for: .collapsed), height: cardHeight(for: .collapsed))
-                    .opacity(mode == .collapsed ? 1 : 0)
-                    .blur(radius: (!reduceMotion && mode != .collapsed) ? 3.5 : 0)
-                    .scaleEffect((!reduceMotion && mode != .collapsed) ? 0.94 : 1.0, anchor: .top)
-                    .allowsHitTesting(mode == .collapsed)
-                    .animation(reduceMotion ? nil : .easeOut(duration: mode == .collapsed ? 0.22 : 0.12), value: mode)
+                HUDLiquidMorphStage(
+                    morphProgress: morphProgress,
+                    stageWidth: stageWidth,
+                    stageHeight: stageHeight,
+                    rowHeight: rowHeight,
+                    topPad: topPad,
+                    side: side,
+                    owlSize: owlSize,
+                    isFloating: isFloating,
+                    isHardwareNotch: isHardwareNotch,
+                    hardwareNotchWidth: metrics.hardwareNotchWidth,
+                    collapsedSize: collapsedSize,
+                    mood: botMood,
+                    phase: metrics.phase,
+                    speakingEnergy: metrics.speakingEnergy,
+                    listeningEnergy: metrics.listeningEnergy,
+                    accentColor: themeAccentColor,
+                    hudOpacity: settings.hudOpacity,
+                    isPaused: !metrics.isVisible,
+                    reduceMotion: reduceMotion
+                )
 
-                if mode == .liveActivity {
-                    liveActivityBody(isFloating: isFloating)
-                        .frame(width: cardWidth(for: .liveActivity), height: cardHeight(for: .liveActivity), alignment: .top)
-                        .transition(
-                            .asymmetric(
-                                insertion: .opacity
-                                    .combined(with: .scale(scale: 0.95, anchor: .top))
-                                    .combined(with: .offset(y: -4)),
-                                removal: .opacity
-                                    .combined(with: .scale(scale: 0.97, anchor: .top))
-                            )
-                        )
-                }
+                interactiveHitLayer(
+                    mode: mode,
+                    stageWidth: stageWidth,
+                    rowHeight: rowHeight,
+                    topPad: topPad,
+                    side: side,
+                    collapsedSize: collapsedSize,
+                    isHardwareNotch: isHardwareNotch
+                )
 
-                if mode == .commandTray {
-                    commandTrayBody(isFloating: isFloating)
-                        .frame(width: cardWidth(for: .commandTray), height: cardHeight(for: .commandTray), alignment: .top)
-                        .transition(
-                            .asymmetric(
-                                insertion: .opacity
-                                    .combined(with: .scale(scale: 0.95, anchor: .top))
-                                    .combined(with: .offset(y: -4)),
-                                removal: .opacity
-                                    .combined(with: .scale(scale: 0.97, anchor: .top))
-                            )
-                        )
+                if showDockRow {
+                    microDockRow
+                        .frame(height: 34, alignment: .center)
+                        .padding(.top, topPad + side)
+                        .allowsHitTesting(mode == .commandTray)
                 }
             }
-            .frame(width: shellWidth, height: shellHeight, alignment: .top)
-            .background {
-                hudBackdrop(shape: morphShape, isFloating: isFloating, mode: mode)
-            }
-            .contentShape(Rectangle())
+            .frame(width: stageWidth, height: stageHeight + (showDockRow ? 34 : 0), alignment: .top)
             .onHover { hovering in
                 handleHover(hovering)
             }
             .padding(.top, isFloating ? 1 : 0)
-            .animation(shellSpring, value: mode)
-            .animation(reduceMotion ? nil : .spring(response: 0.34, dampingFraction: 0.84), value: shellWidth)
-            .animation(reduceMotion ? nil : .spring(response: 0.34, dampingFraction: 0.84), value: shellHeight)
-            .animation(reduceMotion ? nil : .spring(response: 0.34, dampingFraction: 0.84), value: isFloating)
             .animation(reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.82), value: botMood)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .environment(\.colorScheme, settings.appAppearance.colorScheme ?? colorScheme)
         .onAppear {
             syncVoiceTargets()
+            let initiallyExpanded = (metrics.displayMode != .collapsed)
+            isStageExpanded = initiallyExpanded
+            morphProgress = initiallyExpanded ? 1.0 : 0.0
+            let initialDock = (metrics.displayMode == .commandTray)
+            dockMounted = initialDock
+            dockRevealed = initialDock
             if desiredDisplayMode != metrics.displayMode {
                 onDisplayModeChange(desiredDisplayMode)
             }
+        }
+        .onChange(of: metrics.displayMode) { oldMode, newMode in
+            handleDisplayModeTransition(from: oldMode, to: newMode)
         }
         .onChange(of: effectiveSpeaking) { _, _ in
             syncVoiceTargets()
@@ -163,6 +469,14 @@ struct HUDView: View {
         .onChange(of: reduceMotion) { _, reduced in
             if reduced {
                 metrics.stopAnimations()
+                let expanded = (metrics.displayMode != .collapsed)
+                stageCollapseTask?.cancel()
+                dockUnmountTask?.cancel()
+                dockRevealTask?.cancel()
+                isStageExpanded = expanded
+                morphProgress = expanded ? 1.0 : 0.0
+                dockMounted = (metrics.displayMode == .commandTray)
+                dockRevealed = (metrics.displayMode == .commandTray)
             } else if metrics.isVisible {
                 syncVoiceTargets()
             }
@@ -204,6 +518,83 @@ struct HUDView: View {
         }
     }
 
+    // MARK: - Morph & Dock Transition Coordination
+
+    private func handleDisplayModeTransition(from oldMode: HUDDisplayMode, to newMode: HUDDisplayMode) {
+        let wasExpanded = (oldMode != .collapsed)
+        let nowExpanded = (newMode != .collapsed)
+
+        let expandSpring: Animation? = reduceMotion
+            ? nil
+            : .spring(response: 0.50, dampingFraction: 0.72, blendDuration: 0.12)
+        let collapseSpring: Animation? = reduceMotion
+            ? nil
+            : .spring(response: 0.36, dampingFraction: 0.84, blendDuration: 0.08)
+
+        if nowExpanded {
+            stageCollapseTask?.cancel()
+            stageCollapseTask = nil
+            isStageExpanded = true
+            if !wasExpanded || morphProgress < 0.999 {
+                withAnimation(expandSpring) {
+                    morphProgress = 1.0
+                }
+            }
+        } else {
+            withAnimation(collapseSpring) {
+                morphProgress = 0.0
+            }
+            stageCollapseTask?.cancel()
+            if reduceMotion {
+                isStageExpanded = false
+            } else {
+                stageCollapseTask = Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(460))
+                    guard !Task.isCancelled, metrics.displayMode == .collapsed else { return }
+                    isStageExpanded = false
+                }
+            }
+        }
+
+        if newMode == .commandTray {
+            dockUnmountTask?.cancel()
+            dockUnmountTask = nil
+            dockRevealTask?.cancel()
+            dockMounted = true
+            if reduceMotion {
+                dockRevealed = true
+            } else {
+                let extraDelayMs = wasExpanded ? 0 : 90
+                dockRevealTask = Task { @MainActor in
+                    if extraDelayMs > 0 {
+                        try? await Task.sleep(for: .milliseconds(extraDelayMs))
+                    } else {
+                        await Task.yield()
+                    }
+                    guard !Task.isCancelled, metrics.displayMode == .commandTray else { return }
+                    dockRevealed = true
+                }
+            }
+        } else {
+            dockRevealTask?.cancel()
+            dockRevealTask = nil
+            let tuckAnim: Animation? = reduceMotion ? nil : .spring(response: 0.22, dampingFraction: 0.88)
+            withAnimation(tuckAnim) {
+                dockRevealed = false
+            }
+            dockUnmountTask?.cancel()
+            if reduceMotion {
+                dockMounted = false
+            } else {
+                dockUnmountTask = Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(240))
+                    guard !Task.isCancelled, metrics.displayMode != .commandTray else { return }
+                    dockMounted = false
+                }
+            }
+        }
+    }
+
     private func syncVoiceTargets() {
         metrics.updateVoiceTargets(
             speaking: metrics.isVisible && !reduceMotion && effectiveSpeaking,
@@ -217,7 +608,7 @@ struct HUDView: View {
         if hovering {
             guard settings.hudExpandOnHover else { return }
             hoverTask = Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(160))
+                try? await Task.sleep(for: .milliseconds(85))
                 guard !Task.isCancelled else { return }
                 hoverIntent = true
             }
@@ -235,176 +626,66 @@ struct HUDView: View {
         }
     }
 
-    // MARK: - Shape & Backdrop (H4 Boxless Active Modes)
-
-    private func hudMorphShape(isFloating: Bool, mode: HUDDisplayMode) -> HUDMorphShape {
-        if isFloating {
-            let radius: CGFloat = mode == .collapsed ? 18 : 22
-            return HUDMorphShape(topFlare: 0, topRadius: radius, bottomRadius: radius)
-        }
-        let topFlare: CGFloat = mode == .collapsed ? 8 : 14
-        let bottomRadius: CGFloat = mode == .collapsed ? 12 : 20
-        return HUDMorphShape(topFlare: topFlare, topRadius: 0, bottomRadius: bottomRadius)
-    }
+    // MARK: - Interactive Hit Layer (Zero-Clip Click & Accessibility Targets)
 
     @ViewBuilder
-    private func hudBackdrop(shape: HUDMorphShape, isFloating: Bool, mode: HUDDisplayMode) -> some View {
-        if mode == .collapsed && (isFloating || !metrics.hasHardwareNotch) {
-            ZStack {
-                shape
-                    .fill(obsidianSurface.opacity(settings.hudOpacity))
-                shape
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                Color.white.opacity(0.08),
-                                Color.white.opacity(0.015),
-                                Color.clear,
-                            ],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
-                shape
-                    .stroke(
-                        Color.white.opacity(0.12),
-                        lineWidth: 1.0
-                    )
-            }
-        } else {
+    private func interactiveHitLayer(
+        mode: HUDDisplayMode,
+        stageWidth: CGFloat,
+        rowHeight: CGFloat,
+        topPad: CGFloat,
+        side: CGFloat,
+        collapsedSize: CGSize,
+        isHardwareNotch: Bool
+    ) -> some View {
+        if mode == .collapsed {
             Color.clear
-        }
-    }
-
-    // MARK: - Layout 1: Collapsed — Ultra-Minimal Eyes-Only Stealth Peek
-
-    @ViewBuilder
-    private func collapsedStealthWings(isFloating: Bool) -> some View {
-        let rowHeight: CGFloat = isFloating ? 36 : metrics.notchHeight
-        let miniSize = CGSize(width: 28, height: 15)
-
-        Group {
-            if !isFloating && metrics.hasHardwareNotch {
-                HStack(spacing: 0) {
-                    Color.clear
-                        .frame(width: 46, height: rowHeight)
-
-                    HStack(spacing: 0) {
-                        Spacer()
-                            .frame(width: metrics.hardwareNotchWidth)
-
-                        NailBotFaceView(
-                            mood: botMood,
-                            form: .miniEyes,
-                            phase: metrics.phase,
-                            speakingEnergy: metrics.speakingEnergy,
-                            listeningEnergy: metrics.listeningEnergy,
-                            accentColor: themeAccentColor,
-                            size: miniSize,
-                            isPaused: !metrics.isVisible
-                        )
-                        .frame(width: 46, height: rowHeight, alignment: .center)
-                    }
-                    .frame(width: metrics.hardwareNotchWidth + 46, height: rowHeight)
-                    .background(
-                        Color.black,
-                        in: UnevenRoundedRectangle(
-                            topLeadingRadius: 0,
-                            bottomLeadingRadius: 12,
-                            bottomTrailingRadius: 12,
-                            topTrailingRadius: 0,
-                            style: .continuous
-                        )
-                    )
+                .frame(width: collapsedSize.width, height: rowHeight)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    isPinned.toggle()
                 }
-            } else {
-                NailBotFaceView(
-                    mood: botMood,
-                    form: .miniEyes,
-                    phase: metrics.phase,
-                    speakingEnergy: metrics.speakingEnergy,
-                    listeningEnergy: metrics.listeningEnergy,
-                    accentColor: themeAccentColor,
-                    size: miniSize,
-                    isPaused: !metrics.isVisible
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                .clipShape(hudMorphShape(isFloating: isFloating, mode: .collapsed))
+                .accessibilityLabel("Buka pendamping Noko-Owl Meet Nail")
+                .accessibilityAddTraits(.isButton)
+                .accessibilityAction { isPinned.toggle() }
+        } else {
+            ZStack(alignment: .top) {
+                if isHardwareNotch {
+                    Color.clear
+                        .frame(width: collapsedSize.width, height: rowHeight)
+                        .contentShape(Rectangle())
+                }
+
+                Color.clear
+                    .frame(width: side, height: side)
+                    .contentShape(Rectangle())
+                    .onTapGesture(count: 2) {
+                        AppNavigator.shared.showMainWindow()
+                    }
+                    .onTapGesture(count: 1) {
+                        isPinned.toggle()
+                    }
+                    .accessibilityLabel("Noko-Owl pendamping suara Meet Nail")
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityAction { isPinned.toggle() }
+                    .padding(.top, topPad)
             }
         }
-        .frame(height: rowHeight)
-        .contentShape(Rectangle())
-        .onTapGesture {
-            isPinned.toggle()
-        }
-        .accessibilityLabel("Buka pendamping Noko-Owl Meet Nail")
-        .accessibilityAddTraits(.isButton)
-        .accessibilityAction { isPinned.toggle() }
     }
 
-    // MARK: - Layout 2: Expanded Mode A — H4 Boxless Floating Noko Stage
+    // MARK: - Staggered Circular Icon Micro-Dock (.commandTray)
 
     @ViewBuilder
-    private func liveActivityBody(isFloating: Bool) -> some View {
-        let topPad: CGFloat = (!isFloating && metrics.hasHardwareNotch) ? (metrics.notchHeight + 6) : 6
-        let side = HUDPanel.stageSide(for: settings.hudSize)
-        let owlSize = HUDPanel.owlSize(for: settings.hudSize)
+    private var microDockRow: some View {
+        let hasMeetAction = meet.active
+        let pinIndex = hasMeetAction ? 1 : 0
+        let windowIndex = hasMeetAction ? 2 : 1
+        let closeIndex = hasMeetAction ? 3 : 2
 
-        NokoFloatingCompanionStage(
-            mood: botMood,
-            phase: metrics.phase,
-            speakingEnergy: metrics.speakingEnergy,
-            listeningEnergy: metrics.listeningEnergy,
-            accentColor: themeAccentColor,
-            owlSize: owlSize,
-            isPaused: !metrics.isVisible
-        )
-        .frame(width: side, height: side)
-        .opacity(settings.hudOpacity)
-        .padding(.top, topPad)
-        .contentShape(Rectangle())
-        .onTapGesture(count: 2) {
-            AppNavigator.shared.showMainWindow()
-        }
-        .onTapGesture(count: 1) {
-            isPinned.toggle()
-        }
-        .accessibilityLabel("Noko-Owl pendamping suara Meet Nail")
-        .accessibilityAddTraits(.isButton)
-        .accessibilityAction { isPinned.toggle() }
-    }
-
-    // MARK: - Layout 3: Expanded Mode B — H4 Boxless Stage + Circular Icon Micro-Dock
-
-    @ViewBuilder
-    private func commandTrayBody(isFloating: Bool) -> some View {
-        let topPad: CGFloat = (!isFloating && metrics.hasHardwareNotch) ? (metrics.notchHeight + 6) : 6
-        let side = HUDPanel.stageSide(for: settings.hudSize)
-        let owlSize = HUDPanel.owlSize(for: settings.hudSize)
-
-        VStack(alignment: .center, spacing: 0) {
-            NokoFloatingCompanionStage(
-                mood: botMood,
-                phase: metrics.phase,
-                speakingEnergy: metrics.speakingEnergy,
-                listeningEnergy: metrics.listeningEnergy,
-                accentColor: themeAccentColor,
-                owlSize: owlSize,
-                isPaused: !metrics.isVisible
-            )
-            .frame(width: side, height: side)
-            .opacity(settings.hudOpacity)
-            .contentShape(Rectangle())
-            .onTapGesture(count: 2) {
-                AppNavigator.shared.showMainWindow()
-            }
-            .onTapGesture(count: 1) {
-                isPinned.toggle()
-            }
-
-            HStack(spacing: 8) {
-                if meet.active {
-                    if effectiveSpeaking || meet.voiceBusy || botMood == .processing {
+        HStack(spacing: 8) {
+            if hasMeetAction {
+                if effectiveSpeaking || meet.voiceBusy || botMood == .processing {
+                    staggeredDockButton(index: 0) {
                         hudUtilityCircleButton(
                             systemImage: "speaker.slash.fill",
                             isActive: false,
@@ -413,7 +694,9 @@ struct HUDView: View {
                         ) {
                             meet.interrupt()
                         }
-                    } else {
+                    }
+                } else {
+                    staggeredDockButton(index: 0) {
                         hudUtilityCircleButton(
                             systemImage: "waveform",
                             isActive: meet.voiceReady,
@@ -425,7 +708,9 @@ struct HUDView: View {
                         }
                     }
                 }
+            }
 
+            staggeredDockButton(index: pinIndex) {
                 hudUtilityCircleButton(
                     systemImage: isPinned ? "pin.fill" : "pin",
                     isActive: isPinned,
@@ -435,7 +720,9 @@ struct HUDView: View {
                 ) {
                     isPinned.toggle()
                 }
+            }
 
+            staggeredDockButton(index: windowIndex) {
                 hudUtilityCircleButton(
                     systemImage: "macwindow",
                     isActive: false,
@@ -443,7 +730,9 @@ struct HUDView: View {
                 ) {
                     AppNavigator.shared.showMainWindow()
                 }
+            }
 
+            staggeredDockButton(index: closeIndex) {
                 hudUtilityCircleButton(
                     systemImage: "xmark",
                     isActive: false,
@@ -455,9 +744,25 @@ struct HUDView: View {
                     HUDPanel.shared.hide()
                 }
             }
-            .frame(height: 34, alignment: .center)
         }
-        .padding(.top, topPad)
+    }
+
+    @ViewBuilder
+    private func staggeredDockButton<Content: View>(
+        index: Int,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        let anim: Animation? = reduceMotion
+            ? nil
+            : (dockRevealed
+                ? .spring(response: 0.36, dampingFraction: 0.76).delay(Double(index) * 0.035)
+                : .spring(response: 0.22, dampingFraction: 0.88))
+
+        content()
+            .opacity(dockRevealed ? 1.0 : 0.0)
+            .scaleEffect(dockRevealed ? 1.0 : 0.68)
+            .offset(y: dockRevealed ? 0 : -10)
+            .animation(anim, value: dockRevealed)
     }
 
     @ViewBuilder
@@ -472,88 +777,28 @@ struct HUDView: View {
         helpText: String,
         action: @escaping () -> Void
     ) -> some View {
-        let fillColor: Color = if isDanger {
-            dangerInk.opacity(0.18)
-        } else if let accentTint {
-            accentTint.opacity(0.20)
-        } else if isActive {
-            alabasterInk.opacity(0.18)
-        } else {
-            recessedSurface.opacity(0.94)
-        }
-        let strokeColor: Color = if isDanger {
-            dangerInk.opacity(0.38)
-        } else if let accentTint {
-            accentTint.opacity(0.42)
-        } else if isActive {
-            alabasterInk.opacity(0.32)
-        } else {
-            Color.white.opacity(0.12)
-        }
-        let iconColor: Color = if isDanger {
-            dangerInk
-        } else if let accentTint {
-            accentTint
-        } else if isActive {
-            alabasterInk
-        } else {
-            mutedInk
-        }
+        // Sculpted obsidian tactile dock buttons matching the dark HUD shell.
+        let buttonTone: NeuTone = .obsidian
+        let tintColor: Color? = isDanger ? dangerInk : accentTint
 
-        Button(action: action) {
-            ZStack {
-                Circle()
-                    .fill(fillColor)
-                    .overlay {
-                        Circle()
-                            .strokeBorder(strokeColor, lineWidth: 1)
-                    }
-
-                if let bounceValue {
-                    Image(systemName: systemImage)
-                        .font(.system(size: 10.5, weight: .semibold))
-                        .foregroundStyle(iconColor)
-                        .contentTransition(.symbolEffect(.replace))
-                        .symbolEffect(.bounce, value: bounceValue)
-                } else {
-                    Image(systemName: systemImage)
-                        .font(.system(size: 10.5, weight: .semibold))
-                        .foregroundStyle(iconColor)
-                        .contentTransition(.symbolEffect(.replace))
-                }
-            }
-            .frame(width: 24, height: 24)
-            .opacity(isDisabled ? 0.45 : 1.0)
-            .shadow(color: Color.black.opacity(0.36), radius: 5, x: 0, y: 2)
-            .overlay(alignment: .topTrailing) {
-                if showPinDot {
-                    Circle()
-                        .fill(goldBright)
-                        .frame(width: 6, height: 6)
-                        .overlay {
-                            Circle()
-                                .strokeBorder(obsidianSurface, lineWidth: 1)
-                        }
-                        .offset(x: 1, y: -1)
-                        .transition(.scale.combined(with: .opacity))
-                }
-            }
-            .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .disabled(isDisabled)
-        .help(helpText)
+        HUDDockCircleButton(
+            systemImage: systemImage,
+            tone: buttonTone,
+            isActive: isActive,
+            isDanger: isDanger,
+            accentTint: tintColor,
+            isDisabled: isDisabled,
+            showPinDot: showPinDot,
+            bounceValue: bounceValue,
+            helpText: helpText,
+            dangerInk: dangerInk,
+            goldBright: goldBright,
+            obsidianSurface: obsidianSurface,
+            action: action
+        )
     }
 
-    // MARK: - Layout, Bot Mood & State Resolution
-
-    private func cardWidth(for mode: HUDDisplayMode) -> CGFloat {
-        HUDPanel.cardSize(for: mode, metrics: metrics, settings: settings, meet: meet).width
-    }
-
-    private func cardHeight(for mode: HUDDisplayMode) -> CGFloat {
-        HUDPanel.cardSize(for: mode, metrics: metrics, settings: settings, meet: meet).height
-    }
+    // MARK: - Bot Mood & State Resolution
 
     private var desiredDisplayMode: HUDDisplayMode {
         if isPinned || (settings.hudExpandOnHover && hoverIntent) {
@@ -624,5 +869,119 @@ struct HUDView: View {
         case .emerald:
             return botMood == .error ? dangerInk : Color(hex: 0x6BBF8E)
         }
+    }
+}
+
+private struct HUDNeuCircleButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    let tone: NeuTone
+    let isHovered: Bool
+    let tint: Color?
+
+    func makeBody(configuration: Configuration) -> some View {
+        let pressed = configuration.isPressed && isEnabled
+
+        configuration.label
+            .background {
+                if pressed {
+                    NeuInsetBackground(isCapsule: true, depth: 0.72, tone: tone)
+                } else {
+                    NeuRaisedBackground(
+                        isCapsule: true,
+                        elevation: isHovered ? 0.72 : 0.56,
+                        tint: tint,
+                        tone: tone
+                    )
+                }
+            }
+            .scaleEffect(pressed && !reduceMotion ? 0.93 : (isHovered && !reduceMotion ? 1.04 : 1.0))
+            .opacity(isEnabled ? 1.0 : 0.45)
+            .animation(
+                reduceMotion ? nil : .spring(response: 0.22, dampingFraction: 0.76),
+                value: pressed
+            )
+    }
+}
+
+private struct HUDDockCircleButton: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isHovered = false
+
+    let systemImage: String
+    let tone: NeuTone
+    let isActive: Bool
+    let isDanger: Bool
+    let accentTint: Color?
+    let isDisabled: Bool
+    let showPinDot: Bool
+    let bounceValue: Bool?
+    let helpText: String
+    let dangerInk: Color
+    let goldBright: Color
+    let obsidianSurface: Color
+    let action: () -> Void
+
+    var body: some View {
+        let palette = NailPalette(scheme: colorScheme)
+        let iconColor: Color = if isDanger {
+            dangerInk
+        } else if let accentTint {
+            accentTint
+        } else {
+            palette.primaryText(for: tone)
+        }
+
+        Button(action: action) {
+            ZStack {
+                if let bounceValue {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(iconColor)
+                        .contentTransition(.symbolEffect(.replace))
+                        .symbolEffect(.bounce, value: bounceValue)
+                } else {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(iconColor)
+                        .contentTransition(.symbolEffect(.replace))
+                }
+            }
+            .frame(width: 26, height: 26)
+            .overlay(alignment: .topTrailing) {
+                if showPinDot {
+                    Circle()
+                        .fill(goldBright)
+                        .frame(width: 6, height: 6)
+                        .overlay {
+                            Circle()
+                                .strokeBorder(obsidianSurface, lineWidth: 1)
+                        }
+                        .offset(x: 1, y: -1)
+                        .transition(.scale.combined(with: .opacity))
+                }
+            }
+            .contentShape(Circle())
+        }
+        .buttonStyle(
+            HUDNeuCircleButtonStyle(
+                tone: tone,
+                isHovered: isHovered,
+                tint: accentTint
+            )
+        )
+        .disabled(isDisabled)
+        .onHover { hovering in
+            if reduceMotion {
+                isHovered = hovering
+            } else {
+                withAnimation(.spring(response: 0.22, dampingFraction: 0.78)) {
+                    isHovered = hovering
+                }
+            }
+        }
+        .help(helpText)
     }
 }

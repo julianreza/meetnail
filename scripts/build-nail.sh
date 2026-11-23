@@ -25,9 +25,17 @@ if [ ! -d "$BUILT_APP" ]; then
 fi
 
 mkdir -p "$ROOT/build"
-find "$ROOT/build" -maxdepth 1 -name "*.app" -exec rm -rf {} +
+rm -rf "$ROOT/build"/*
 cp -cR "$BUILT_APP" "$OUT_APP"
-rm -rf "$BUILT_APP" "$HOME/Library/Developer/Xcode/DerivedData"/NAIL-* /tmp/nail-*/Build/Products/*/*.app /tmp/meetnail-*/Build/Products/*/*.app 2>/dev/null || true
+rm -rf \
+  "$BUILT_APP" \
+  "$HOME/Library/Developer/Xcode/DerivedData"/NAIL-* \
+  /tmp/nail-*/Build/Products/*/*.app \
+  /tmp/meetnail-*/Build/Products/*/*.app \
+  /tmp/nail-avatar-* \
+  /tmp/nail-pre-hd-* \
+  /tmp/meetnail-release* \
+  2>/dev/null || true
 
 if [ ! -x "$OUT_APP/Contents/Frameworks/Electron.app/Contents/MacOS/Electron" ]; then
   echo "Missing embedded Electron runtime in $OUT_APP" >&2

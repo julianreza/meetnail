@@ -1,5 +1,8 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
+const {readFileSync} = require('node:fs');
+const {join} = require('node:path');
+const vm = require('node:vm');
 const {createMeetingNotesMemory} = require('../NAIL/Resources/meet.cjs');
 const {
   CodexLiveSession,
@@ -8,12 +11,13 @@ const {
   resolveStylePrompt,
 } = require('../NAIL/Resources/codex-voice.cjs');
 
-test('CodexLiveSession.runTextTurn resets turn state, syncs notes, appends user text, and cleans up', async () => {
+test('CodexLiveSession.runTextTurn resets turn state, syncs notes, appends user text, and cleans up', async t => {
   const memory = createMeetingNotesMemory();
   const baseMs = new Date(2026, 10, 21, 14, 0, 0).getTime();
   memory.addEntry({text: 'Keputusan awal: rilis hari Jumat.', speaker: 'Rina', timestampMs: baseMs});
 
   const session = new CodexLiveSession({notesMemory: memory});
+  t.after(() => session.clearIdleTimer());
   session.child = {};
   session.appReady = Promise.resolve();
   session.threadId = 'thr_wake_1';
@@ -103,7 +107,7 @@ test('CodexLiveSession.runTextTurn resets turn state, syncs notes, appends user 
   assert.deepEqual(rpcCalls[1].params, {
     threadId: 'thr_wake_1',
     role: 'user',
-    text: 'Nail, kapan jadwal rilisnya?',
+    text: 'Jawab sebagai Nail dalam bahasa Indonesia.\n\nNail, kapan jadwal rilisnya?',
   });
 
   assert.equal(result.heard, 'Nail, kapan jadwal rilisnya?');
@@ -117,7 +121,26 @@ test('CodexLiveSession.runTextTurn resets turn state, syncs notes, appends user 
   });
   assert.ok(progressEvents.includes('voice-codex-heard'));
   assert.ok(progressEvents.includes('voice-sending'));
-  session.clearIdleTimer();
+});
+
+test('manual Codex voice uses direct audio with presentation reading off', async () => {
+  const source = readFileSync(join(__dirname, '../NAIL/Resources/meet.cjs'), 'utf8');
+  const start = source.indexOf('  async function voiceTurn(');
+  const end = source.indexOf('    const work =', start);
+  const calls = [];
+  const voiceTurn = vm.runInNewContext(`${source.slice(start, end)}\n}; voiceTurn`, {
+    provider: 'codex',
+    codexSession: {},
+    platform: 'meet',
+    presentationReadingEnabled: false,
+    startCodexWakeDaemon: () => { assert.fail('Manual live audio must not start Whisper'); },
+    emit: () => {},
+    runCodexLiveTurn: async () => { calls.push('live'); },
+  });
+
+  const wc = {};
+  await voiceTurn(wc, () => {}, () => {});
+  assert.deepEqual(calls, ['live']);
 });
 
 test('CodexLiveSession.runTextTurn returns noAudio for empty or whitespace text without calling appendText', async () => {

@@ -13,6 +13,7 @@ import json
 import os
 import pathlib
 import re
+import selectors
 import shutil
 import subprocess
 import sys
@@ -49,16 +50,80 @@ STYLE_SYSTEMS = {
     ),
 }
 SYSTEM = STYLE_SYSTEMS["casual"]
-WHISPER_PROMPT = "Halo Nail, Hei Nail. Nail adalah asisten rapat Bahasa Indonesia. Apa kabar Nail?"
-WHISPER_HOTWORDS = "Nail, Halo Nail, Hei Nail"
+WHISPER_HOTWORDS = "Nail"
 WAKE_PATTERN = re.compile(
-    r"(?:(?:halo|hei|hai)\s+)?(?:\b(?:nail|nael|neil|nyle|nel|niel|nahir\w*|nayu)\b|alun\s*ayel)",
+    r"(?:(?:halo|hei|hai|oke|ok|ya)\s+)?(?:\b(?:nail|nael|neil|nyle|nel|niel|nell|niall|nahir\w*|nayu)\b|alun\s*ayel)|(?:halo|hei|hai)\s+\b(?:mail|nil)\b",
     re.IGNORECASE,
 )
+PHANTOM_EXACT_PHRASES = frozenset({
+    "terima kasih",
+    "terima kasih banyak",
+    "terima kasih banyak banyak",
+    "terima kasih ya",
+    "terima kasih semuanya",
+    "terima kasih kerana menonton",
+    "terima kasih telah menonton",
+    "terima kasih sudah menonton",
+    "terima kasih telah menyaksikan",
+    "selamat menonton",
+    "selamat tinggal",
+    "sampai jumpa di video berikutnya",
+    "jangan lupa subscribe",
+    "thanks for watching",
+    "thank you for watching",
+    "thank you",
+    "subtitles by",
+    "amara.org",
+    "amara org",
+})
+
+
+def _normalize_words(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", (text or "").lower())
+
+
+def is_hallucinated_text(text: str) -> bool:
+    cleaned = " ".join(_normalize_words(text))
+    if not cleaned:
+        return True
+    if cleaned in PHANTOM_EXACT_PHRASES:
+        return True
+    if any(phrase in cleaned for phrase in ("terima kasih kerana menonton", "terima kasih telah menonton", "terima kasih sudah menonton", "amara org", "subtitles by")):
+        return True
+    return False
+
+
+def is_self_echo(heard: str, recent_reply: str) -> bool:
+    heard_words = _normalize_words(heard)
+    reply_words = _normalize_words(recent_reply)
+    if not heard_words or not reply_words:
+        return False
+    if WAKE_PATTERN.search(heard or ""):
+        return False
+    reply_set = set(reply_words)
+    overlap = sum(1 for word in heard_words if word in reply_set)
+    ratio = overlap / len(heard_words)
+    if len(heard_words) >= 3 and ratio >= 0.72:
+        return True
+    joined_heard = " ".join(heard_words)
+    joined_reply = " ".join(reply_words)
+    return len(heard_words) >= 2 and joined_heard in joined_reply
+
+
+def has_speech_energy(samples: np.ndarray, min_peak: float = 0.008, min_rms: float = 0.0018) -> bool:
+    if samples is None or len(samples) < 1600:
+        return False
+    peak = float(np.max(np.abs(samples)))
+    if peak < min_peak:
+        return False
+    rms = float(np.sqrt(np.mean(samples.astype(np.float32) ** 2)))
+    return rms >= min_rms
 
 
 def detect_wake_utterance(text: str) -> dict:
     text = (text or "").strip()
+    if is_hallucinated_text(text):
+        return {"triggered": False, "raw": "", "prompt": "", "has_query": False}
     match = WAKE_PATTERN.search(text)
     if not match:
         return {"triggered": False, "raw": text, "prompt": "", "has_query": False}
@@ -73,26 +138,76 @@ def extract_after_wake(text: str) -> str | None:
     return res["prompt"] if res["triggered"] else None
 
 
-def decode_pcm16k(source: pathlib.Path) -> np.ndarray:
+def decode_pcm16k(source: pathlib.Path, *, allow_incomplete: bool = False) -> np.ndarray:
     pcm = subprocess.run(
         ["ffmpeg", "-nostdin", "-v", "error", "-i", str(source), "-ac", "1", "-ar", "16000", "-f", "s16le", "-"],
-        check=True,
+        check=not allow_incomplete,
         stdout=subprocess.PIPE,
+        timeout=15.0,
     ).stdout
     if not pcm:
         raise RuntimeError("audio has no decodable samples")
     return np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
 
 
-def transcribe(model: WhisperModel, samples: np.ndarray, beam_size: int = 3) -> str:
-    segments, _ = model.transcribe(
-        samples,
-        language="id",
-        beam_size=beam_size,
-        initial_prompt=WHISPER_PROMPT,
-        hotwords=WHISPER_HOTWORDS,
-    )
-    return " ".join(segment.text.strip() for segment in segments).strip()
+def _keep_segment(segment, *, allow_ambiguous_short: bool = False) -> bool:
+    text = (getattr(segment, "text", "") or "").strip()
+    if not text or is_hallucinated_text(text):
+        return False
+    no_speech = getattr(segment, "no_speech_prob", 0.0)
+    avg_logprob = getattr(segment, "avg_logprob", 0.0)
+    if isinstance(no_speech, (int, float)) and no_speech >= 0.65:
+        return False
+    if (
+        not allow_ambiguous_short
+        and len(_normalize_words(text)) <= 3
+        and isinstance(no_speech, (int, float))
+        and no_speech >= 0.45
+        and isinstance(avg_logprob, (int, float))
+        and avg_logprob < -0.55
+    ):
+        return False
+    if isinstance(avg_logprob, (int, float)) and avg_logprob < -1.15:
+        return False
+    return True
+
+
+def _run_whisper_transcribe(model: WhisperModel, samples: np.ndarray, *, beam_size: int = 1, word_timestamps: bool = False):
+    kwargs = {
+        "language": "id",
+        "beam_size": beam_size,
+        "hotwords": WHISPER_HOTWORDS,
+        "condition_on_previous_text": False,
+        "no_speech_threshold": 0.6,
+        "log_prob_threshold": -1.0,
+        "compression_ratio_threshold": 2.2,
+        "vad_filter": True,
+        "vad_parameters": {"min_speech_duration_ms": 140, "min_silence_duration_ms": 280},
+    }
+    if word_timestamps:
+        kwargs["word_timestamps"] = True
+    try:
+        return model.transcribe(samples, **kwargs)
+    except TypeError:
+        fallback = {"language": "id", "beam_size": beam_size, "hotwords": WHISPER_HOTWORDS}
+        if word_timestamps:
+            fallback["word_timestamps"] = True
+        return model.transcribe(samples, **fallback)
+
+
+def transcribe(
+    model: WhisperModel,
+    samples: np.ndarray,
+    beam_size: int = 1,
+    *,
+    min_peak: float = 0.008,
+    min_rms: float = 0.0018,
+) -> str:
+    if not has_speech_energy(samples, min_peak=min_peak, min_rms=min_rms):
+        return ""
+    segments, _ = _run_whisper_transcribe(model, samples, beam_size=beam_size)
+    kept = [segment.text.strip() for segment in segments if _keep_segment(segment)]
+    return " ".join(kept).strip()
 
 
 _SAMPLE_RATE = 16000
@@ -281,16 +396,12 @@ def _words_to_entries(segments, timeline: list[_SpeakerSpan], duration: float) -
     return entries
 
 
-def _transcribe_entries(model: WhisperModel, samples: np.ndarray, timeline: list[_SpeakerSpan]) -> list[dict]:
-    segments, _ = model.transcribe(
-        samples,
-        language="id",
-        beam_size=3,
-        initial_prompt=WHISPER_PROMPT,
-        hotwords=WHISPER_HOTWORDS,
-        word_timestamps=bool(timeline),
-    )
-    return _words_to_entries(segments, timeline, len(samples) / _SAMPLE_RATE)
+def _transcribe_entries(
+    model: WhisperModel, samples: np.ndarray, timeline: list[_SpeakerSpan], *, beam_size: int = 1
+) -> list[dict]:
+    segments, _ = _run_whisper_transcribe(model, samples, beam_size=beam_size, word_timestamps=bool(timeline))
+    filtered = [segment for segment in segments if _keep_segment(segment)]
+    return _words_to_entries(filtered, timeline, len(samples) / _SAMPLE_RATE)
 
 
 def _transcribe_daemon(whisper: WhisperModel, models: pathlib.Path | None, next_speaker: int) -> int:
@@ -306,22 +417,29 @@ def _transcribe_daemon(whisper: WhisperModel, models: pathlib.Path | None, next_
             if not raw.strip():
                 continue
             speaker_failed = False
+            req_id = None
             try:
                 req = json.loads(raw)
+                req_id = req.get("id")
                 audio = pathlib.Path(req["audio"])
                 if not audio.is_absolute():
                     raise ValueError("audio path must be absolute")
-                samples = decode_pcm16k(audio)
-                if req.get("mode") == "wake":
-                    if np.max(np.abs(samples)) > 0.0001:
-                        raw_heard = transcribe(whisper, samples, beam_size=1)
+                mode = req.get("mode")
+                samples = decode_pcm16k(audio, allow_incomplete=mode in ("preview", "wake-preview"))
+                # Compare more candidates for finished commands while keeping previews responsive.
+                beam_size = 5 if mode in ("transcript", "wake") else 1
+                if mode in ("wake", "wake-preview"):
+                    if has_speech_energy(samples, min_peak=0.008, min_rms=0.0018):
+                        raw_heard = transcribe(whisper, samples, beam_size=beam_size)
                         out = detect_wake_utterance(raw_heard)
                     else:
                         out = {"triggered": False, "raw": "", "prompt": "", "has_query": False}
+                    if req_id is not None:
+                        out["id"] = req_id
                     print(json.dumps(out, ensure_ascii=False), flush=True)
                     continue
                 entries = []
-                if np.max(np.abs(samples)) > 0.0001:
+                if has_speech_energy(samples, min_peak=0.008, min_rms=0.0018):
                     timeline = []
                     if worker is not None:
                         try:
@@ -331,13 +449,15 @@ def _transcribe_daemon(whisper: WhisperModel, models: pathlib.Path | None, next_
                             print(f"Speaker labels unavailable: {exc}", file=sys.stderr)
                             worker.close()
                             worker = None
-                    entries = _transcribe_entries(whisper, samples, timeline)
+                    entries = _transcribe_entries(whisper, samples, timeline, beam_size=beam_size)
                 out = {"entries": entries}
             except Exception as exc:
                 out = {"error": str(exc)}
             out["nextSpeaker"] = next_speaker
             if speaker_failed:
                 out["speakerLabels"] = False
+            if req_id is not None:
+                out["id"] = req_id
             print(json.dumps(out, ensure_ascii=False), flush=True)
     finally:
         if worker is not None:
@@ -363,10 +483,12 @@ class AgySession:
         self.agy_bin = shutil.which("agy") or str(pathlib.Path.home() / ".local/bin/agy")
         self.proc: subprocess.Popen[str] | None = None
         self.first_turn = True
+        self._stdout_buf = bytearray()
 
     def start(self) -> None:
         if self.proc and self.proc.poll() is None:
             return
+        self._stdout_buf.clear()
         self.proc = subprocess.Popen(
             [
                 self.agy_bin,
@@ -387,49 +509,128 @@ class AgySession:
         )
         self.first_turn = True
 
-    def warmup(self) -> None:
-        self.start()
-        assert self.proc and self.proc.stdin and self.proc.stdout
-        self.proc.stdin.write(
-            json.dumps({"event": "user", "message": {"content": f"{self.system_prompt}\n\nBalas satu kata saja: Siap."}}) + "\n"
-        )
-        self.proc.stdin.flush()
-        while True:
-            line = self.proc.stdout.readline()
-            if not line:
-                break
-            try:
-                ev = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if ev.get("event") == "result":
-                self.first_turn = False
-                break
+    def _drain_pending_stdout(self) -> None:
+        self._stdout_buf.clear()
+        if not self.proc or not self.proc.stdout:
+            return
+        try:
+            fd = self.proc.stdout.fileno()
+        except Exception:
+            return
+        sel = selectors.DefaultSelector()
+        try:
+            sel.register(fd, selectors.EVENT_READ)
+            while sel.select(timeout=0):
+                chunk = os.read(fd, 4096)
+                if not chunk:
+                    break
+        except Exception:
+            pass
+        finally:
+            sel.close()
 
-    def ask(self, text: str, notes_context: str = "") -> str:
+    def _read_line_with_timeout(self, timeout_s: float) -> str:
+        assert self.proc and self.proc.stdout
+        try:
+            fd = self.proc.stdout.fileno()
+        except Exception:
+            return self.proc.stdout.readline()
+        nl = self._stdout_buf.find(b"\n")
+        if nl != -1:
+            raw_line = bytes(self._stdout_buf[: nl + 1])
+            del self._stdout_buf[: nl + 1]
+            return raw_line.decode("utf-8", errors="replace")
+        deadline = time.monotonic() + timeout_s
+        sel = selectors.DefaultSelector()
+        try:
+            sel.register(fd, selectors.EVENT_READ)
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("agy response timed out")
+                events = sel.select(timeout=remaining)
+                if not events:
+                    raise TimeoutError("agy response timed out")
+                chunk = os.read(fd, 4096)
+                if not chunk:
+                    if self._stdout_buf:
+                        raw_line = bytes(self._stdout_buf)
+                        self._stdout_buf.clear()
+                        return raw_line.decode("utf-8", errors="replace")
+                    return ""
+                self._stdout_buf.extend(chunk)
+                nl = self._stdout_buf.find(b"\n")
+                if nl != -1:
+                    raw_line = bytes(self._stdout_buf[: nl + 1])
+                    del self._stdout_buf[: nl + 1]
+                    return raw_line.decode("utf-8", errors="replace")
+        finally:
+            sel.close()
+
+    def warmup(self, timeout_s: float = 30.0) -> None:
         self.start()
         assert self.proc and self.proc.stdin and self.proc.stdout
-        content = build_agy_prompt(self.system_prompt, self.first_turn, text, notes_context)
-        self.first_turn = False
-        self.proc.stdin.write(json.dumps({"event": "user", "message": {"content": content}}) + "\n")
-        self.proc.stdin.flush()
-        while True:
-            line = self.proc.stdout.readline()
-            if not line:
-                raise RuntimeError("agy stream closed unexpectedly")
-            try:
-                ev = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if ev.get("event") == "result":
-                res = ev.get("result") or {}
-                if res.get("status") == "ERROR":
-                    raise RuntimeError(res.get("error") or "agy turn error")
-                return (res.get("response") or "").strip()
+        try:
+            self._drain_pending_stdout()
+            self.proc.stdin.write(
+                json.dumps({"event": "user", "message": {"content": f"{self.system_prompt}\n\nBalas satu kata saja: Siap."}}) + "\n"
+            )
+            self.proc.stdin.flush()
+            while True:
+                line = self._read_line_with_timeout(timeout_s)
+                if not line:
+                    raise RuntimeError("agy stream closed during warmup")
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if ev.get("event") == "result":
+                    self.first_turn = False
+                    break
+        except Exception:
+            self.close()
+            raise
+
+    def ask(self, text: str, notes_context: str = "", timeout_s: float = 45.0) -> str:
+        self.start()
+        assert self.proc and self.proc.stdin and self.proc.stdout
+        try:
+            self._drain_pending_stdout()
+            content = build_agy_prompt(self.system_prompt, self.first_turn, text, notes_context)
+            self.first_turn = False
+            self.proc.stdin.write(json.dumps({"event": "user", "message": {"content": content}}) + "\n")
+            self.proc.stdin.flush()
+            while True:
+                line = self._read_line_with_timeout(timeout_s)
+                if not line:
+                    raise RuntimeError("agy stream closed unexpectedly")
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if ev.get("event") == "result":
+                    res = ev.get("result") or {}
+                    if res.get("status") == "ERROR":
+                        raise RuntimeError(res.get("error") or "agy turn error")
+                    return (res.get("response") or "").strip()
+        except Exception:
+            self.close()
+            raise
 
     def close(self) -> None:
-        if self.proc and self.proc.poll() is None:
-            self.proc.terminate()
+        if not self.proc:
+            return
+        try:
+            if self.proc.poll() is None:
+                self.proc.terminate()
+                try:
+                    self.proc.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    self.proc.kill()
+        except Exception:
+            pass
+        self.proc = None
+        self.first_turn = True
 
 
 EDGE_NEURAL_VOICES = ("id-ID-GadisNeural", "id-ID-ArdiNeural")
@@ -713,6 +914,12 @@ def _attach_tts_metadata(out: dict, tts_meta: dict | object) -> None:
             out["tts_fallback_reason"] = tts_meta["fallback_reason"]
 
 
+def _emit_daemon_line(payload: dict, request_id=None) -> None:
+    if request_id is not None:
+        payload = {"id": request_id, **payload}
+    print(json.dumps(payload, ensure_ascii=False), flush=True)
+
+
 def run_turn(
     whisper: WhisperModel,
     agy: AgySession,
@@ -729,13 +936,22 @@ def run_turn(
     elevenlabs_voice_id: str = "",
     elevenlabs_model: str = ELEVENLABS_DEFAULT_MODEL,
     tts_state: dict | None = None,
+    request_id=None,
+    is_follow_up: bool = False,
+    recent_reply: str = "",
+    elevenlabs_api_key: str = "",
 ) -> dict:
     t0 = time.monotonic()
     samples = decode_pcm16k(from_wav.resolve())
-    raw_heard = transcribe(whisper, samples)
+    min_peak = 0.010 if is_follow_up else 0.008
+    min_rms = 0.0024 if is_follow_up else 0.0018
+    raw_heard = transcribe(whisper, samples, min_peak=min_peak, min_rms=min_rms)
     t_asr = time.monotonic()
     if not raw_heard:
-        return {"heard": "", "reply": "", "asr_s": round(t_asr - t0, 2)}
+        return {"heard": "", "reply": "", "skipped": True, "asr_s": round(t_asr - t0, 2)}
+
+    if is_follow_up and recent_reply and is_self_echo(raw_heard, recent_reply):
+        return {"heard": "", "reply": "", "skipped": True, "echo_filtered": True, "asr_s": round(t_asr - t0, 2)}
 
     heard = raw_heard
     if require_wake:
@@ -748,12 +964,15 @@ def run_turn(
         heard = triggered
 
     if notify_wake:
-        print(json.dumps({"event": "wake", "heard": heard}, ensure_ascii=False), flush=True)
+        _emit_daemon_line({"event": "wake", "heard": heard}, request_id=request_id)
 
     reply = None
     if defer_reply:
-        print(json.dumps({"event": "transcribed", "heard": heard}, ensure_ascii=False), flush=True)
-        decision = json.loads(sys.stdin.readline())
+        _emit_daemon_line({"event": "transcribed", "heard": heard}, request_id=request_id)
+        decision_line = sys.stdin.readline()
+        if not decision_line:
+            return {"heard": heard, "reply": "", "skipped": True}
+        decision = json.loads(decision_line)
         if decision.get("action") == "cancel":
             return {"heard": heard, "reply": "", "skipped": True}
         if decision.get("action") == "answer":
@@ -767,16 +986,17 @@ def run_turn(
             out["notulen_line"] = raw_heard
         return out
 
-    tts_meta = speak(
-        reply,
-        reply_wav.resolve(),
-        voice=tts_voice,
-        rate=tts_rate,
-        tts_engine=tts_engine,
-        elevenlabs_voice_id=elevenlabs_voice_id,
-        elevenlabs_model=elevenlabs_model,
-        tts_state=tts_state,
-    )
+    speak_kwargs = {
+        "voice": tts_voice,
+        "rate": tts_rate,
+        "tts_engine": tts_engine,
+        "elevenlabs_voice_id": elevenlabs_voice_id,
+        "elevenlabs_model": elevenlabs_model,
+        "tts_state": tts_state,
+    }
+    if elevenlabs_api_key:
+        speak_kwargs["elevenlabs_api_key"] = elevenlabs_api_key
+    tts_meta = speak(reply, reply_wav.resolve(), **speak_kwargs)
     t_tts = time.monotonic()
     out = {
         "heard": heard,
@@ -794,51 +1014,73 @@ def run_turn(
 
 def _run_agy_daemon(whisper: WhisperModel, agy: AgySession, args: argparse.Namespace) -> int:
     agy.warmup()
-    print(json.dumps({"ready": True}), flush=True)
+    _emit_daemon_line({"ready": True})
     daemon_tts_state: dict = {"sticky_fallback": False, "sticky_reason": ""}
-    for raw in sys.stdin:
+    cached_elevenlabs_key = get_elevenlabs_api_key() if args.tts_engine == "elevenlabs" else ""
+    while True:
+        raw = sys.stdin.readline()
+        if not raw:
+            break
         raw = raw.strip()
         if not raw:
             continue
         req = json.loads(raw)
+        req_id = req.get("id")
         try:
             req_tts_engine = str(req.get("tts_engine", args.tts_engine))
             req_elevenlabs_voice_id = str(req.get("elevenlabs_voice_id", args.elevenlabs_voice_id))
             req_elevenlabs_model = str(req.get("elevenlabs_model", args.elevenlabs_model))
+            if req_tts_engine == "elevenlabs" and not cached_elevenlabs_key:
+                cached_elevenlabs_key = get_elevenlabs_api_key()
             if req.get("action") == "speak":
+                speak_kwargs = {
+                    "voice": str(req.get("tts_voice", args.tts_voice)),
+                    "rate": int(req.get("tts_rate", args.tts_rate)),
+                    "tts_engine": req_tts_engine,
+                    "elevenlabs_voice_id": req_elevenlabs_voice_id,
+                    "elevenlabs_model": req_elevenlabs_model,
+                    "tts_state": daemon_tts_state,
+                }
+                if cached_elevenlabs_key:
+                    speak_kwargs["elevenlabs_api_key"] = cached_elevenlabs_key
                 tts_meta = speak(
                     str(req["text"]),
                     pathlib.Path(req["reply_wav"]).resolve(),
-                    voice=str(req.get("tts_voice", args.tts_voice)),
-                    rate=int(req.get("tts_rate", args.tts_rate)),
-                    tts_engine=req_tts_engine,
-                    elevenlabs_voice_id=req_elevenlabs_voice_id,
-                    elevenlabs_model=req_elevenlabs_model,
-                    tts_state=daemon_tts_state,
+                    **speak_kwargs,
                 )
                 out: dict = {"spoken": True}
                 _attach_tts_metadata(out, tts_meta)
+            elif req.get("action") == "cancel":
+                continue
             else:
+                turn_kwargs = {
+                    "require_wake": bool(req.get("require_wake", False)),
+                    "notify_wake": True,
+                    "notulen": bool(req.get("notulen", False)),
+                    "tts_voice": str(req.get("tts_voice", args.tts_voice)),
+                    "tts_rate": int(req.get("tts_rate", args.tts_rate)),
+                    "notes_context": str(req.get("notes_context") or ""),
+                    "defer_reply": bool(req.get("defer_reply", False)),
+                    "tts_engine": req_tts_engine,
+                    "elevenlabs_voice_id": req_elevenlabs_voice_id,
+                    "elevenlabs_model": req_elevenlabs_model,
+                    "tts_state": daemon_tts_state,
+                    "request_id": req_id,
+                    "is_follow_up": bool(req.get("is_follow_up", False)),
+                    "recent_reply": str(req.get("recent_reply") or ""),
+                }
+                if cached_elevenlabs_key:
+                    turn_kwargs["elevenlabs_api_key"] = cached_elevenlabs_key
                 out = run_turn(
                     whisper,
                     agy,
                     pathlib.Path(req["from_wav"]),
                     pathlib.Path(req["reply_wav"]),
-                    require_wake=bool(req.get("require_wake", False)),
-                    notify_wake=True,
-                    notulen=bool(req.get("notulen", False)),
-                    tts_voice=str(req.get("tts_voice", args.tts_voice)),
-                    tts_rate=int(req.get("tts_rate", args.tts_rate)),
-                    notes_context=str(req.get("notes_context") or ""),
-                    defer_reply=bool(req.get("defer_reply", False)),
-                    tts_engine=req_tts_engine,
-                    elevenlabs_voice_id=req_elevenlabs_voice_id,
-                    elevenlabs_model=req_elevenlabs_model,
-                    tts_state=daemon_tts_state,
+                    **turn_kwargs,
                 )
         except Exception as exc:
             out = {"error": _sanitize_error(str(exc)), "heard": "", "reply": ""}
-        print(json.dumps(out, ensure_ascii=False), flush=True)
+        _emit_daemon_line(out, request_id=req_id)
     return 0
 
 
@@ -892,7 +1134,10 @@ def main() -> int:
             print(json.dumps({"error": str(exc)}, ensure_ascii=False), flush=True)
             return 1
         return _transcribe_daemon(whisper, args.speaker_models, args.first_speaker)
-    whisper = WhisperModel(args.whisper_model, device="cpu", compute_type="int8", cpu_threads=cpu_threads)
+    try:
+        whisper = WhisperModel(args.whisper_model, device="cpu", compute_type="int8", cpu_threads=cpu_threads, local_files_only=True)
+    except Exception:
+        whisper = WhisperModel(args.whisper_model, device="cpu", compute_type="int8", cpu_threads=cpu_threads)
     agy = AgySession(args.agy_model, system_prompt=system_prompt)
     try:
         if args.daemon:

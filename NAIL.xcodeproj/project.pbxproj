@@ -15,6 +15,7 @@
 		C1000000000000000000000E /* OnboardingBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000000D /* OnboardingBanner.swift */; };
 		C10000000000000000000052 /* NailTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000051 /* NailTheme.swift */; };
 		C10000000000000000000054 /* NotulenReaderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000053 /* NotulenReaderView.swift */; };
+		C10000000000000000000066 /* HUDMorphShape.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000066 /* HUDMorphShape.swift */; };
 		C10000000000000000000010 /* HotKeyManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000000F /* HotKeyManager.swift */; };
 		C10000000000000000000012 /* MeetSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000011 /* MeetSession.swift */; };
 		C10000000000000000000061 /* MeetAvatar.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000061 /* MeetAvatar.swift */; };
@@ -24,6 +25,8 @@
 		C1000000000000000000001A /* VoiceSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000019 /* VoiceSettings.swift */; };
 		C1000000000000000000001C /* PolicyZone.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000001B /* PolicyZone.swift */; };
 		C1000000000000000000001E /* NotulenExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000001D /* NotulenExporter.swift */; };
+		C10000000000000000000063 /* NotulenSummary.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000063 /* NotulenSummary.swift */; };
+		C10000000000000000000064 /* NotulenBackendClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000064 /* NotulenBackendClient.swift */; };
 		C20000000000000000000020 /* meet.cjs in Resources */ = {isa = PBXBuildFile; fileRef = F2000000000000000000001F /* meet.cjs */; };
 		C20000000000000000000022 /* meet-media.cjs in Resources */ = {isa = PBXBuildFile; fileRef = F20000000000000000000021 /* meet-media.cjs */; };
 		C20000000000000000000062 /* meet-avatar.cjs in Resources */ = {isa = PBXBuildFile; fileRef = F20000000000000000000062 /* meet-avatar.cjs */; };
@@ -33,6 +36,8 @@
 		C20000000000000000000056 /* AppIcon.icns in Resources */ = {isa = PBXBuildFile; fileRef = F20000000000000000000055 /* AppIcon.icns */; };
 		C4000000000000000000002C /* MeetLinkAndSettingsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F4000000000000000000002B /* MeetLinkAndSettingsTests.swift */; };
 		C40000000000000000000060 /* MeetAvatarTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F40000000000000000000060 /* MeetAvatarTests.swift */; };
+		C40000000000000000000065 /* NotulenSummaryAndBackendTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F40000000000000000000065 /* NotulenSummaryAndBackendTests.swift */; };
+		C40000000000000000000067 /* HUDMorphTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F40000000000000000000067 /* HUDMorphTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -54,6 +59,7 @@
 		F1000000000000000000000D /* OnboardingBanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = OnboardingBanner.swift; path = NAIL/UI/OnboardingBanner.swift; sourceTree = "<group>"; };
 		F10000000000000000000051 /* NailTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = NailTheme.swift; path = NAIL/UI/NailTheme.swift; sourceTree = "<group>"; };
 		F10000000000000000000053 /* NotulenReaderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = NotulenReaderView.swift; path = NAIL/UI/NotulenReaderView.swift; sourceTree = "<group>"; };
+		F10000000000000000000066 /* HUDMorphShape.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = HUDMorphShape.swift; path = NAIL/UI/HUDMorphShape.swift; sourceTree = "<group>"; };
 		F1000000000000000000000F /* HotKeyManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = HotKeyManager.swift; path = NAIL/Audio/HotKeyManager.swift; sourceTree = "<group>"; };
 		F10000000000000000000011 /* MeetSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = MeetSession.swift; path = NAIL/Speech/MeetSession.swift; sourceTree = "<group>"; };
 		F10000000000000000000061 /* MeetAvatar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = MeetAvatar.swift; path = NAIL/Speech/MeetAvatar.swift; sourceTree = "<group>"; };
@@ -63,6 +69,8 @@
 		F10000000000000000000019 /* VoiceSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = VoiceSettings.swift; path = NAIL/Brain/VoiceSettings.swift; sourceTree = "<group>"; };
 		F1000000000000000000001B /* PolicyZone.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = PolicyZone.swift; path = NAIL/MCP/PolicyZone.swift; sourceTree = "<group>"; };
 		F1000000000000000000001D /* NotulenExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = NotulenExporter.swift; path = NAIL/Exporter/NotulenExporter.swift; sourceTree = "<group>"; };
+		F10000000000000000000063 /* NotulenSummary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = NotulenSummary.swift; path = NAIL/Exporter/NotulenSummary.swift; sourceTree = "<group>"; };
+		F10000000000000000000064 /* NotulenBackendClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = NotulenBackendClient.swift; path = NAIL/Exporter/NotulenBackendClient.swift; sourceTree = "<group>"; };
 		F2000000000000000000001F /* meet.cjs */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; name = meet.cjs; path = NAIL/Resources/meet.cjs; sourceTree = "<group>"; };
 		F20000000000000000000021 /* meet-media.cjs */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; name = meet-media.cjs; path = NAIL/Resources/meet-media.cjs; sourceTree = "<group>"; };
 		F20000000000000000000062 /* meet-avatar.cjs */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; name = meet-avatar.cjs; path = NAIL/Resources/meet-avatar.cjs; sourceTree = "<group>"; };
@@ -74,6 +82,8 @@
 		F3000000000000000000002A /* NAIL.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; name = NAIL.entitlements; path = NAIL/NAIL.entitlements; sourceTree = "<group>"; };
 		F4000000000000000000002B /* MeetLinkAndSettingsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = MeetLinkAndSettingsTests.swift; path = NAILTests/MeetLinkAndSettingsTests.swift; sourceTree = "<group>"; };
 		F40000000000000000000060 /* MeetAvatarTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = MeetAvatarTests.swift; path = NAILTests/MeetAvatarTests.swift; sourceTree = "<group>"; };
+		F40000000000000000000065 /* NotulenSummaryAndBackendTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = NotulenSummaryAndBackendTests.swift; path = NAILTests/NotulenSummaryAndBackendTests.swift; sourceTree = "<group>"; };
+		F40000000000000000000067 /* HUDMorphTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = HUDMorphTests.swift; path = NAILTests/HUDMorphTests.swift; sourceTree = "<group>"; };
 		B10000000000000000000001 /* Meet Nail.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Meet Nail.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		B10100000000000000000002 /* NAILTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = NAILTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -128,6 +138,8 @@
 			children = (
 				F4000000000000000000002B /* MeetLinkAndSettingsTests.swift */,
 				F40000000000000000000060 /* MeetAvatarTests.swift */,
+				F40000000000000000000065 /* NotulenSummaryAndBackendTests.swift */,
+				F40000000000000000000067 /* HUDMorphTests.swift */,
 			);
 			name = NAILTests;
 			sourceTree = "<group>";
@@ -151,6 +163,7 @@
 				F1000000000000000000000D,
 				F10000000000000000000051,
 				F10000000000000000000053,
+				F10000000000000000000066,
 			);
 			name = UI;
 			sourceTree = "<group>";
@@ -202,6 +215,8 @@
 			isa = PBXGroup;
 			children = (
 				F1000000000000000000001D,
+				F10000000000000000000063,
+				F10000000000000000000064,
 			);
 			name = Exporter;
 			sourceTree = "<group>";
@@ -348,6 +363,7 @@
 				C1000000000000000000000E /* OnboardingBanner.swift in Sources */,
 				C10000000000000000000052 /* NailTheme.swift in Sources */,
 				C10000000000000000000054 /* NotulenReaderView.swift in Sources */,
+				C10000000000000000000066 /* HUDMorphShape.swift in Sources */,
 				C10000000000000000000010 /* HotKeyManager.swift in Sources */,
 				C10000000000000000000012 /* MeetSession.swift in Sources */,
 				C10000000000000000000061 /* MeetAvatar.swift in Sources */,
@@ -357,6 +373,8 @@
 				C1000000000000000000001A /* VoiceSettings.swift in Sources */,
 				C1000000000000000000001C /* PolicyZone.swift in Sources */,
 				C1000000000000000000001E /* NotulenExporter.swift in Sources */,
+				C10000000000000000000063 /* NotulenSummary.swift in Sources */,
+				C10000000000000000000064 /* NotulenBackendClient.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -366,6 +384,8 @@
 			files = (
 				C4000000000000000000002C /* MeetLinkAndSettingsTests.swift in Sources */,
 				C40000000000000000000060 /* MeetAvatarTests.swift in Sources */,
+				C40000000000000000000065 /* NotulenSummaryAndBackendTests.swift in Sources */,
+				C40000000000000000000067 /* HUDMorphTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

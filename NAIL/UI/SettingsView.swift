@@ -98,6 +98,10 @@ struct SettingsView: View {
     @State private var isLoadingElevenLabs = false
     @State private var elevenLabsErrorMessage: String?
     @State private var customElevenLabsVoiceId = ""
+    @State private var backendCredentialInput = ""
+    @State private var hasBackendCredential = false
+    @State private var backendCredentialStatus: String?
+    @State private var backendCredentialError: String?
 
     var body: some View {
         let palette = NailPalette(scheme: colorScheme)
@@ -140,6 +144,7 @@ struct SettingsView: View {
         .frame(minWidth: 540)
         .onAppear {
             customElevenLabsVoiceId = settings.elevenLabsVoiceId
+            hasBackendCredential = NotulenBackendKeychain.hasCredential()
             refreshChecks()
         }
         .onChange(of: settings.elevenLabsVoiceId) { _, newId in
@@ -176,13 +181,16 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 16) {
             TalmoPageHeader(
                 title: "Pengaturan",
-                subtitle: "\(settings.provider.shortBadge) · \(settings.speakingStyle.label) · HUD \(settings.hudLayoutStyle.label)"
+                subtitle: "\(settings.provider.shortBadge) · \(settings.speakingStyle.label) · HUD \(settings.hudLayoutStyle.label)",
+                tone: .porcelain
             ) {
                 if isSessionActive {
                     NailStatusBadge(
                         text: "Terkunci saat rapat aktif",
-                        color: palette.textSecondary,
-                        icon: "lock.fill"
+                        color: palette.warn,
+                        icon: "lock.fill",
+                        onInk: false,
+                        tone: .porcelain
                     )
                 }
             }
@@ -191,6 +199,7 @@ struct SettingsView: View {
                 TalmoSegmentedPill(
                     options: Array(SettingsTab.allCases),
                     selection: $activeTab,
+                    tone: .porcelain,
                     icon: { $0.systemImage },
                     label: { $0.label }
                 )
@@ -227,12 +236,15 @@ struct SettingsView: View {
     }
 
     private func providerSelectionCard(palette: NailPalette) -> some View {
-        TalmoCard {
+        let tone: NeuTone = .porcelain
+        return TalmoCard(tone: tone) {
             VStack(alignment: .leading, spacing: 14) {
                 NailSectionTitle(
                     title: "Penyedia AI & Suara",
                     subtitle: "Pilih mesin suara & kecerdasan yang digunakan Nail saat rapat",
-                    icon: "cpu.fill"
+                    icon: "cpu.fill",
+                    onInk: false,
+                    tone: tone
                 )
 
                 VStack(spacing: 10) {
@@ -241,6 +253,7 @@ struct SettingsView: View {
                         tag: "Utama · Natural",
                         tagColor: palette.good,
                         subtitle: "Suara real-time ChatGPT yang ekspresif & responsif",
+                        tone: tone,
                         palette: palette
                     )
                     providerCard(
@@ -248,13 +261,15 @@ struct SettingsView: View {
                         tag: "Cadangan · Lokal",
                         tagColor: palette.info,
                         subtitle: "Antigravity CLI + Whisper lokal & Neural TTS Indonesia",
+                        tone: tone,
                         palette: palette
                     )
                     providerCard(
                         provider: .deepseek,
                         tag: "Opsional",
-                        tagColor: palette.textSecondary,
+                        tagColor: palette.secondaryText(for: tone),
                         subtitle: "Pipeline lokal dengan suara bawaan (stella)",
+                        tone: tone,
                         palette: palette
                     )
                 }
@@ -269,6 +284,7 @@ struct SettingsView: View {
         tag: String,
         tagColor: Color,
         subtitle: String,
+        tone: NeuTone,
         palette: NailPalette
     ) -> some View {
         let selected = settings.provider == provider
@@ -282,50 +298,47 @@ struct SettingsView: View {
             }
         } label: {
             HStack(alignment: .center, spacing: 12) {
-                selectionCheckCircle(selected: selected, palette: palette)
+                selectionCheckCircle(selected: selected, palette: palette, tone: tone)
 
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 8) {
                         Text(provider.label)
                             .font(.callout.weight(.semibold))
-                            .foregroundStyle(palette.textPrimary)
-                        NailStatusBadge(text: tag, color: tagColor)
+                            .foregroundStyle(palette.primaryText(for: tone))
+                        NailStatusBadge(text: tag, color: tagColor, onInk: tone == .obsidian, tone: tone)
                     }
                     Text(subtitle)
                         .font(.caption)
-                        .foregroundStyle(palette.textSecondary)
+                        .foregroundStyle(palette.secondaryText(for: tone))
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
                 Spacer(minLength: 8)
             }
-            .padding(14)
-            .background {
-                neuSelectableSurface(selected: selected, cornerRadius: 16, palette: palette)
-            }
-            .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(NeuSelectableCardButtonStyle(selected: selected, cornerRadius: 16, padding: 14, tone: tone))
         .nailHoverLift(cornerRadius: 16)
     }
 
     private func providerConfigurationCard(palette: NailPalette) -> some View {
-        TalmoCard {
+        let tone: NeuTone = .porcelain
+        return TalmoCard(tone: tone) {
             VStack(alignment: .leading, spacing: 14) {
                 NailSectionTitle(
                     title: "Konfigurasi Penyedia",
                     subtitle: settings.provider.label,
-                    icon: "slider.horizontal.3"
+                    icon: "slider.horizontal.3",
+                    tone: tone
                 )
 
                 Group {
                     switch settings.provider {
                     case .codex:
-                        codexConfigView(palette: palette)
+                        codexConfigView(palette: palette, tone: tone)
                     case .antigravity:
-                        antigravityConfigView(palette: palette)
+                        antigravityConfigView(palette: palette, tone: tone)
                     case .deepseek:
-                        deepseekConfigView(palette: palette)
+                        deepseekConfigView(palette: palette, tone: tone)
                     }
                 }
                 .id(settings.provider)
@@ -344,49 +357,91 @@ struct SettingsView: View {
     }
 
     @ViewBuilder
-    private func codexConfigView(palette: NailPalette) -> some View {
+    private func codexConfigView(palette: NailPalette, tone: NeuTone) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            NeuWell(padding: 14, cornerRadius: 16) {
+            NeuWell(padding: 14, cornerRadius: 16, tone: tone) {
                 VStack(alignment: .leading, spacing: 10) {
-                    Picker("Suara ChatGPT", selection: $settings.codexVoice) {
+                    neuMenuPickerRow(
+                        "Suara ChatGPT",
+                        valueLabel: settings.codexVoice == "cove" ? "Cove (Default)" : settings.codexVoice.capitalized,
+                        systemImage: "waveform",
+                        tone: tone,
+                        palette: palette
+                    ) {
                         ForEach(VoiceSettings.codexPrimaryVoiceOptions, id: \.self) { voice in
-                            Text(voice == "cove" ? "Cove (Default)" : voice.capitalized).tag(voice)
+                            Button {
+                                settings.codexVoice = voice
+                            } label: {
+                                let label = voice == "cove" ? "Cove (Default)" : voice.capitalized
+                                if voice == settings.codexVoice {
+                                    Label(label, systemImage: "checkmark")
+                                } else {
+                                    Text(label)
+                                }
+                            }
                         }
                         Divider()
                         ForEach(VoiceSettings.codexExtendedVoiceOptions, id: \.self) { voice in
-                            Text(voice.capitalized).tag(voice)
+                            Button {
+                                settings.codexVoice = voice
+                            } label: {
+                                if voice == settings.codexVoice {
+                                    Label(voice.capitalized, systemImage: "checkmark")
+                                } else {
+                                    Text(voice.capitalized)
+                                }
+                            }
                         }
                     }
                     .disabled(isSessionActive)
 
                     Divider()
-                        .overlay(palette.hairline)
+                        .overlay(palette.hairline(for: tone))
 
-                    Toggle("Panggil otomatis dengan kata \"Nail\" (Hands-Free)", isOn: $settings.codexHandsFree)
-                        .disabled(isSessionActive)
+                    neuToggleRow(
+                        "Panggil otomatis dengan kata \"Nail\" (Hands-Free)",
+                        isOn: $settings.codexHandsFree,
+                        tone: tone,
+                        palette: palette
+                    )
+                    .disabled(isSessionActive)
 
                     Divider()
-                        .overlay(palette.hairline)
+                        .overlay(palette.hairline(for: tone))
 
-                    Picker("Model Whisper Lokal", selection: $settings.whisperModel) {
+                    neuMenuPickerRow(
+                        "Model Whisper Lokal",
+                        valueLabel: settings.whisperModel,
+                        systemImage: "ear.and.waveform",
+                        tone: tone,
+                        palette: palette
+                    ) {
                         ForEach(VoiceSettings.whisperModelOptions, id: \.self) { model in
-                            Text(model).tag(model)
+                            Button {
+                                settings.whisperModel = model
+                            } label: {
+                                if model == settings.whisperModel {
+                                    Label(model, systemImage: "checkmark")
+                                } else {
+                                    Text(model)
+                                }
+                            }
                         }
                     }
                     .disabled(isSessionActive)
                 }
             }
 
-            NeuWell(padding: 12, cornerRadius: 14) {
+            NeuWell(padding: 12, cornerRadius: 14, tone: tone) {
                 HStack(alignment: .top, spacing: 9) {
                     Image(systemName: "info.circle.fill")
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(palette.textSecondary)
+                        .foregroundStyle(palette.secondaryText(for: tone))
                         .padding(.top, 1)
 
                     Text("Hands-Free menyimak kata \"Nail\" secara lokal lewat Whisper tanpa memakai kuota Codex sebelum dipanggil. Tombol manual \"Tanya\" tetap tersedia sebagai cadangan. Perubahan suara, gaya bicara, dan Hands-Free berlaku di sesi rapat berikutnya.")
                         .font(.caption)
-                        .foregroundStyle(palette.textSecondary)
+                        .foregroundStyle(palette.secondaryText(for: tone))
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -409,74 +464,155 @@ struct SettingsView: View {
     }
 
     @ViewBuilder
-    private func antigravityConfigView(palette: NailPalette) -> some View {
+    private func antigravityConfigView(palette: NailPalette, tone: NeuTone) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            NeuWell(padding: 14, cornerRadius: 16) {
+            NeuWell(padding: 14, cornerRadius: 16, tone: tone) {
                 VStack(alignment: .leading, spacing: 10) {
-                    Picker("Model Antigravity", selection: $settings.agyModel) {
+                    neuMenuPickerRow(
+                        "Model Antigravity",
+                        valueLabel: settings.agyModel,
+                        systemImage: "cpu",
+                        tone: tone,
+                        palette: palette
+                    ) {
                         ForEach(VoiceSettings.agyModelOptions, id: \.self) { model in
-                            Text(model).tag(model)
+                            Button {
+                                settings.agyModel = model
+                            } label: {
+                                if model == settings.agyModel {
+                                    Label(model, systemImage: "checkmark")
+                                } else {
+                                    Text(model)
+                                }
+                            }
                         }
                     }
                     .disabled(isSessionActive)
 
                     Divider()
-                        .overlay(palette.hairline)
+                        .overlay(palette.hairline(for: tone))
 
-                    Picker("Model Whisper Lokal", selection: $settings.whisperModel) {
+                    neuMenuPickerRow(
+                        "Model Whisper Lokal",
+                        valueLabel: settings.whisperModel,
+                        systemImage: "ear.and.waveform",
+                        tone: tone,
+                        palette: palette
+                    ) {
                         ForEach(VoiceSettings.whisperModelOptions, id: \.self) { model in
-                            Text(model).tag(model)
+                            Button {
+                                settings.whisperModel = model
+                            } label: {
+                                if model == settings.whisperModel {
+                                    Label(model, systemImage: "checkmark")
+                                } else {
+                                    Text(model)
+                                }
+                            }
                         }
                     }
                     .disabled(isSessionActive)
 
                     Divider()
-                        .overlay(palette.hairline)
+                        .overlay(palette.hairline(for: tone))
 
-                    Picker("Mesin Suara (TTS)", selection: $settings.ttsEngine) {
+                    neuMenuPickerRow(
+                        "Mesin Suara (TTS)",
+                        valueLabel: settings.ttsEngine.label,
+                        systemImage: "waveform.and.mic",
+                        tone: tone,
+                        palette: palette
+                    ) {
                         ForEach(TTSEngine.allCases) { engine in
-                            Text(engine.label).tag(engine)
+                            Button {
+                                settings.ttsEngine = engine
+                            } label: {
+                                if engine == settings.ttsEngine {
+                                    Label(engine.label, systemImage: "checkmark")
+                                } else {
+                                    Text(engine.label)
+                                }
+                            }
                         }
                     }
                     .disabled(isSessionActive)
 
                     if settings.ttsEngine == .elevenlabs {
                         Divider()
-                            .overlay(palette.hairline)
+                            .overlay(palette.hairline(for: tone))
 
-                        elevenLabsConfigSection(palette: palette)
+                        elevenLabsConfigSection(palette: palette, tone: tone)
 
                         Divider()
-                            .overlay(palette.hairline)
+                            .overlay(palette.hairline(for: tone))
 
-                        Picker("Suara Cadangan (Edge / macOS)", selection: $settings.ttsVoice) {
+                        neuMenuPickerRow(
+                            "Suara Cadangan (Edge / macOS)",
+                            valueLabel: TTSVoiceCatalog.displayName(for: settings.ttsVoice),
+                            systemImage: "speaker.wave.2",
+                            tone: tone,
+                            palette: palette
+                        ) {
                             ForEach(voices, id: \.self) { voice in
-                                Text(TTSVoiceCatalog.displayName(for: voice)).tag(voice)
+                                Button {
+                                    settings.ttsVoice = voice
+                                } label: {
+                                    let name = TTSVoiceCatalog.displayName(for: voice)
+                                    if voice == settings.ttsVoice {
+                                        Label(name, systemImage: "checkmark")
+                                    } else {
+                                        Text(name)
+                                    }
+                                }
                             }
                         }
                         .disabled(isSessionActive)
                     } else {
                         Divider()
-                            .overlay(palette.hairline)
+                            .overlay(palette.hairline(for: tone))
 
-                        Picker("Suara Indonesia (TTS)", selection: $settings.ttsVoice) {
+                        neuMenuPickerRow(
+                            "Suara Indonesia (TTS)",
+                            valueLabel: TTSVoiceCatalog.displayName(for: settings.ttsVoice),
+                            systemImage: "speaker.wave.2",
+                            tone: tone,
+                            palette: palette
+                        ) {
                             ForEach(voices, id: \.self) { voice in
-                                Text(TTSVoiceCatalog.displayName(for: voice)).tag(voice)
+                                Button {
+                                    settings.ttsVoice = voice
+                                } label: {
+                                    let name = TTSVoiceCatalog.displayName(for: voice)
+                                    if voice == settings.ttsVoice {
+                                        Label(name, systemImage: "checkmark")
+                                    } else {
+                                        Text(name)
+                                    }
+                                }
                             }
                         }
                         .disabled(isSessionActive)
                     }
 
                     Divider()
-                        .overlay(palette.hairline)
+                        .overlay(palette.hairline(for: tone))
 
                     VStack(alignment: .leading, spacing: 8) {
                         HStack(spacing: 10) {
-                            Text("Kecepatan (\(settings.ttsRate) wpm)")
+                            Text("Kecepatan")
                                 .font(.callout.weight(.medium))
+                                .foregroundStyle(palette.primaryText(for: tone))
+
+                            Text("\(settings.ttsRate) wpm")
+                                .font(.caption.weight(.semibold))
                                 .monospacedDigit()
                                 .contentTransition(.numericText())
-                                .foregroundStyle(palette.textPrimary)
+                                .foregroundStyle(palette.primaryText(for: tone))
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 3)
+                                .background {
+                                    NeuRaisedBackground(isCapsule: true, elevation: 0.42, tone: tone)
+                                }
                                 .animation(reduceMotion ? nil : .snappy(duration: 0.18), value: settings.ttsRate)
 
                             Spacer()
@@ -490,60 +626,61 @@ struct SettingsView: View {
                                     elevenLabsModel: settings.elevenLabsModel
                                 )
                             }
-                            .buttonStyle(NailPillButtonStyle(variant: .secondary, compact: true))
+                            .buttonStyle(NailPillButtonStyle(variant: .secondary, compact: true, tone: tone))
                         }
 
-                        Slider(
+                        NeuSlider(
                             value: Binding(
                                 get: { Double(settings.ttsRate) },
                                 set: { settings.ttsRate = Int($0.rounded()) }
                             ),
                             in: 140...230,
-                            step: 5
+                            step: 5,
+                            tone: tone
                         )
                     }
                 }
             }
 
             if settings.ttsEngine == .elevenlabs {
-                NeuWell(padding: 12, cornerRadius: 14) {
+                NeuWell(padding: 12, cornerRadius: 14, tone: tone) {
                     HStack(alignment: .top, spacing: 9) {
                         Image(systemName: "arrow.triangle.branch")
                             .font(.caption.weight(.semibold))
-                            .foregroundStyle(palette.textSecondary)
+                            .foregroundStyle(palette.secondaryText(for: tone))
                             .padding(.top, 1)
 
                         Text("ElevenLabs memakai kuota akun (10.000 kredit gratis/bulan di paket Free). Jika kredit habis, API gagal, atau offline, Nail otomatis beralih ke Edge Neural lalu Damayanti macOS.")
                             .font(.caption)
-                            .foregroundStyle(palette.textSecondary)
+                            .foregroundStyle(palette.secondaryText(for: tone))
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             } else if TTSVoiceCatalog.isNeuralVoice(settings.ttsVoice) {
-                NeuWell(padding: 12, cornerRadius: 14) {
+                NeuWell(padding: 12, cornerRadius: 14, tone: tone) {
                     HStack(alignment: .top, spacing: 9) {
                         Image(systemName: "waveform.and.mic")
                             .font(.caption.weight(.semibold))
-                            .foregroundStyle(palette.textSecondary)
+                            .foregroundStyle(palette.secondaryText(for: tone))
                             .padding(.top, 1)
 
                         Text("Suara Neural Bahasa Indonesia memakai pelafalan penutur asli (butuh internet; otomatis kembali ke Damayanti macOS jika offline).")
                             .font(.caption)
-                            .foregroundStyle(palette.textSecondary)
+                            .foregroundStyle(palette.secondaryText(for: tone))
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             } else if !TTSVoiceCatalog.hasEnhancedVoice(in: voices) {
-                NeuWell(padding: 12, cornerRadius: 14) {
+                NeuWell(padding: 12, cornerRadius: 14, tone: tone) {
                     HStack(alignment: .top, spacing: 9) {
                         Image(systemName: "sparkles")
                             .font(.caption.weight(.semibold))
-                            .foregroundStyle(palette.textSecondary)
+                            .foregroundStyle(palette.secondaryText(for: tone))
                             .padding(.top, 1)
 
                         Text("Tip: unduh suara Enhanced Bahasa Indonesia di Pengaturan Sistem → Aksesibilitas → Konten Ucapan untuk suara lebih natural.")
                             .font(.caption)
-                            .foregroundStyle(palette.textSecondary)
+                            .foregroundStyle(palette.secondaryText(for: tone))
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
@@ -552,19 +689,21 @@ struct SettingsView: View {
     }
 
     @ViewBuilder
-    private func elevenLabsConfigSection(palette: NailPalette) -> some View {
+    private func elevenLabsConfigSection(palette: NailPalette, tone: NeuTone) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 Text("ElevenLabs API Key")
                     .font(.callout.weight(.medium))
-                    .foregroundStyle(palette.textPrimary)
+                    .foregroundStyle(palette.primaryText(for: tone))
 
                 Spacer()
 
                 NailStatusBadge(
                     text: hasElevenLabsKey ? "Tersimpan di Keychain" : "Belum tersimpan",
                     color: hasElevenLabsKey ? palette.good : palette.warn,
-                    icon: hasElevenLabsKey ? "key.fill" : "exclamationmark.triangle"
+                    icon: hasElevenLabsKey ? "key.fill" : "exclamationmark.triangle",
+                    onInk: tone == .obsidian,
+                    tone: tone
                 )
             }
 
@@ -575,13 +714,14 @@ struct SettingsView: View {
                         : "Masukkan ElevenLabs API Key",
                     text: $elevenLabsAPIKeyInput
                 )
-                .textFieldStyle(.roundedBorder)
+                .textFieldStyle(NeuTextFieldStyle(tone: tone, cornerRadius: 12, horizontalPadding: 11, verticalPadding: 8))
+                .font(.callout.monospaced())
                 .disabled(isSessionActive)
 
                 Button("Simpan") {
                     saveElevenLabsAPIKey()
                 }
-                .buttonStyle(NailPillButtonStyle(variant: .primary, compact: true))
+                .buttonStyle(NailPillButtonStyle(variant: .primary, compact: true, tone: tone))
                 .disabled(
                     isSessionActive
                         || elevenLabsAPIKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -590,7 +730,7 @@ struct SettingsView: View {
                 Button("Hapus") {
                     deleteElevenLabsAPIKey()
                 }
-                .buttonStyle(NailPillButtonStyle(variant: .danger, compact: true))
+                .buttonStyle(NailPillButtonStyle(variant: .danger, compact: true, tone: tone))
                 .disabled(isSessionActive || !hasElevenLabsKey)
             }
 
@@ -606,7 +746,7 @@ struct SettingsView: View {
                         Text(isLoadingElevenLabs ? "Memuat…" : "Cek Kuota & Muat Suara")
                     }
                 }
-                .buttonStyle(NailPillButtonStyle(variant: .secondary, compact: true))
+                .buttonStyle(NailPillButtonStyle(variant: .secondary, compact: true, tone: tone))
                 .disabled(isLoadingElevenLabs)
 
                 if let subscription = elevenLabsSubscription {
@@ -617,7 +757,9 @@ struct SettingsView: View {
                     NailStatusBadge(
                         text: subscription.tier.map { "\($0.capitalized) · \(remainingText)" } ?? remainingText,
                         color: quotaColor,
-                        icon: "gauge.medium"
+                        icon: "gauge.medium",
+                        onInk: tone == .obsidian,
+                        tone: tone
                     )
                 }
 
@@ -638,18 +780,48 @@ struct SettingsView: View {
             }
 
             Divider()
-                .overlay(palette.hairline)
+                .overlay(palette.hairline(for: tone))
 
-            Picker("Model ElevenLabs", selection: $settings.elevenLabsModel) {
+            neuMenuPickerRow(
+                "Model ElevenLabs",
+                valueLabel: TTSVoiceCatalog.elevenLabsModelDisplayName(for: settings.elevenLabsModel),
+                systemImage: "sparkles",
+                tone: tone,
+                palette: palette
+            ) {
                 ForEach(VoiceSettings.elevenLabsModelOptions, id: \.self) { model in
-                    Text(TTSVoiceCatalog.elevenLabsModelDisplayName(for: model)).tag(model)
+                    Button {
+                        settings.elevenLabsModel = model
+                    } label: {
+                        let name = TTSVoiceCatalog.elevenLabsModelDisplayName(for: model)
+                        if model == settings.elevenLabsModel {
+                            Label(name, systemImage: "checkmark")
+                        } else {
+                            Text(name)
+                        }
+                    }
                 }
             }
             .disabled(isSessionActive)
 
-            Picker("Suara ElevenLabs", selection: $settings.elevenLabsVoiceId) {
+            let selectedVoiceName = displayedElevenLabsVoices.first(where: { $0.voiceId == settings.elevenLabsVoiceId })?.name ?? settings.elevenLabsVoiceId
+            neuMenuPickerRow(
+                "Suara ElevenLabs",
+                valueLabel: selectedVoiceName,
+                systemImage: "person.wave.2",
+                tone: tone,
+                palette: palette
+            ) {
                 ForEach(displayedElevenLabsVoices) { voice in
-                    Text(voice.name).tag(voice.voiceId)
+                    Button {
+                        settings.elevenLabsVoiceId = voice.voiceId
+                    } label: {
+                        if voice.voiceId == settings.elevenLabsVoiceId {
+                            Label(voice.name, systemImage: "checkmark")
+                        } else {
+                            Text(voice.name)
+                        }
+                    }
                 }
             }
             .disabled(isSessionActive)
@@ -657,10 +829,10 @@ struct SettingsView: View {
             HStack(spacing: 8) {
                 Text("Custom Voice ID")
                     .font(.callout.weight(.medium))
-                    .foregroundStyle(palette.textPrimary)
+                    .foregroundStyle(palette.primaryText(for: tone))
 
                 TextField("Opsional (contoh: EXAVITQu4vr4xnSDxMaL)", text: $customElevenLabsVoiceId)
-                    .textFieldStyle(.roundedBorder)
+                    .textFieldStyle(NeuTextFieldStyle(tone: tone, cornerRadius: 12, horizontalPadding: 11, verticalPadding: 8))
                     .font(.caption.monospaced())
                     .disabled(isSessionActive)
                     .onChange(of: customElevenLabsVoiceId) { _, rawValue in
@@ -760,27 +932,30 @@ struct SettingsView: View {
     }
 
     @ViewBuilder
-    private func deepseekConfigView(palette: NailPalette) -> some View {
-        NeuWell(padding: 14, cornerRadius: 16) {
+    private func deepseekConfigView(palette: NailPalette, tone: NeuTone) -> some View {
+        NeuWell(padding: 14, cornerRadius: 16, tone: tone) {
             HStack(spacing: 10) {
                 Image(systemName: "waveform.circle.fill")
                     .font(.title3)
-                    .foregroundStyle(palette.textSecondary)
+                    .foregroundStyle(palette.secondaryText(for: tone))
                 Text("DeepSeek menggunakan suara bawaan pipeline lokal (stella).")
                     .font(.callout)
-                    .foregroundStyle(palette.textSecondary)
+                    .foregroundStyle(palette.secondaryText(for: tone))
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
     private func speakingStyleCard(palette: NailPalette) -> some View {
-        TalmoCard {
+        let tone: NeuTone = .porcelain
+        return TalmoCard(tone: tone) {
             VStack(alignment: .leading, spacing: 14) {
                 NailSectionTitle(
                     title: "Gaya Bicara & Pengungkapan",
                     subtitle: "Atur nada bicara dan kepribadian Nail saat menjawab",
-                    icon: "text.bubble.fill"
+                    icon: "text.bubble.fill",
+                    onInk: false,
+                    tone: tone
                 )
 
                 VStack(spacing: 10) {
@@ -796,28 +971,23 @@ struct SettingsView: View {
                             }
                         } label: {
                             HStack(alignment: .top, spacing: 12) {
-                                selectionCheckCircle(selected: selected, palette: palette)
+                                selectionCheckCircle(selected: selected, palette: palette, tone: tone)
                                     .padding(.top, 1)
 
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text(style.label)
                                         .font(.callout.weight(.semibold))
-                                        .foregroundStyle(palette.textPrimary)
+                                        .foregroundStyle(palette.primaryText(for: tone))
                                     Text(style.description)
                                         .font(.caption)
-                                        .foregroundStyle(palette.textSecondary)
+                                        .foregroundStyle(palette.secondaryText(for: tone))
                                         .fixedSize(horizontal: false, vertical: true)
                                 }
 
                                 Spacer(minLength: 8)
                             }
-                            .padding(14)
-                            .background {
-                                neuSelectableSurface(selected: selected, cornerRadius: 16, palette: palette)
-                            }
-                            .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(NeuSelectableCardButtonStyle(selected: selected, cornerRadius: 16, padding: 14, tone: tone))
                         .nailHoverLift(cornerRadius: 16)
                     }
                 }
@@ -825,16 +995,19 @@ struct SettingsView: View {
                 .opacity(isSessionActive ? 0.6 : 1.0)
 
                 Divider()
-                    .overlay(palette.hairline)
+                    .overlay(palette.hairline(for: tone))
 
-                NeuWell(padding: 14, cornerRadius: 16) {
+                NeuWell(padding: 14, cornerRadius: 16, tone: tone) {
                     VStack(alignment: .leading, spacing: 6) {
-                        Toggle("Baca presentasi Google Meet", isOn: $settings.presentationReadingEnabled)
-                            .font(.callout.weight(.medium))
-                            .foregroundStyle(palette.textPrimary)
+                        neuToggleRow(
+                            "Baca presentasi Google Meet",
+                            isOn: $settings.presentationReadingEnabled,
+                            tone: tone,
+                            palette: palette
+                        )
                         Text("Nail membaca presentasi saat diminta. Gambar dapat dikirim ke Codex untuk pertanyaan visual.")
                             .font(.caption)
-                            .foregroundStyle(palette.textSecondary)
+                            .foregroundStyle(palette.secondaryText(for: tone))
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -882,7 +1055,8 @@ struct SettingsView: View {
                             title: "Pratinjau Langsung HUD",
                             subtitle: "Simulasikan tampilan HUD, ekspresi karakter 3D, dan transparansi secara langsung",
                             icon: "sparkles.rectangle.stack",
-                            onInk: true
+                            onInk: true,
+                            tone: .obsidian
                         )
 
                         Spacer(minLength: 12)
@@ -895,7 +1069,8 @@ struct SettingsView: View {
                             title: "Pratinjau Langsung HUD",
                             subtitle: "Simulasikan tampilan HUD, ekspresi karakter 3D, dan transparansi secara langsung",
                             icon: "sparkles.rectangle.stack",
-                            onInk: true
+                            onInk: true,
+                            tone: .obsidian
                         )
 
                         hudPreviewActionControls(palette: palette)
@@ -924,52 +1099,16 @@ struct SettingsView: View {
     }
 
     private func inkStageTogglePill(palette: NailPalette) -> some View {
-        HStack(spacing: 3) {
-            ForEach(SettingsHUDPreviewStage.allCases) { stage in
-                let isSelected = previewStage == stage
-                Button {
-                    if reduceMotion {
-                        previewStage = stage
-                        previewSpeaking = (stage == .speaking)
-                    } else {
-                        withAnimation(.spring(response: 0.26, dampingFraction: 0.82)) {
-                            previewStage = stage
-                            previewSpeaking = (stage == .speaking)
-                        }
-                    }
-                } label: {
-                    HStack(spacing: 5) {
-                        Circle()
-                            .fill(stageDotColor(stage: stage, isSelected: isSelected, palette: palette))
-                            .frame(width: 5.5, height: 5.5)
-
-                        Text(stage.label)
-                            .font(.caption.weight(isSelected ? .semibold : .medium))
-                            .lineLimit(1)
-                    }
-                    .foregroundStyle(isSelected ? Color(hex: 0x0A0A0A) : palette.inkCardMuted)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background {
-                        if isSelected {
-                            Capsule(style: .continuous)
-                                .fill(palette.inkCardFill)
-                        }
-                    }
-                    .contentShape(Capsule(style: .continuous))
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(3)
-        .background {
-            Capsule(style: .continuous)
-                .fill(palette.inkCardSurface)
-                .overlay {
-                    Capsule(style: .continuous)
-                        .strokeBorder(palette.inkCardLine, lineWidth: 1)
-                }
-        }
+        TalmoSegmentedPill(
+            options: Array(SettingsHUDPreviewStage.allCases),
+            selection: $previewStage,
+            compact: true,
+            tone: .obsidian,
+            dotColor: { stage in
+                stageDotColor(stage: stage, isSelected: previewStage == stage, palette: palette)
+            },
+            label: { $0.label }
+        )
     }
 
     private func stageDotColor(stage: SettingsHUDPreviewStage, isSelected: Bool, palette: NailPalette) -> Color {
@@ -1070,18 +1209,9 @@ struct SettingsView: View {
     }
 
     private func hudTelemetryTag(text: String) -> some View {
-        Text(text)
-            .font(.system(size: 10.5, weight: .medium))
+        NeuChip(text, tone: .obsidian)
             .monospacedDigit()
             .contentTransition(.numericText())
-            .foregroundStyle(Color(hex: 0xA4A4A4))
-            .padding(.horizontal, 8)
-            .padding(.vertical, 3)
-            .background(Color.white.opacity(0.05), in: Capsule(style: .continuous))
-            .overlay {
-                Capsule(style: .continuous)
-                    .strokeBorder(Color.white.opacity(0.08), lineWidth: 0.8)
-            }
     }
 
     private func miniHUDChip(accent: Color, isNotch: Bool) -> some View {
@@ -1274,12 +1404,14 @@ struct SettingsView: View {
     }
 
     private func appThemeCard(palette: NailPalette) -> some View {
-        TalmoCard {
+        let tone: NeuTone = .porcelain
+        return TalmoCard(tone: tone) {
             VStack(alignment: .leading, spacing: 14) {
                 NailSectionTitle(
                     title: "Tema Aplikasi",
                     subtitle: "Pilih tampilan jendela utama Meet Nail",
-                    icon: "circle.lefthalf.filled"
+                    icon: "circle.lefthalf.filled",
+                    tone: tone
                 )
 
                 HStack(spacing: 12) {
@@ -1300,26 +1432,21 @@ struct SettingsView: View {
                                 HStack(spacing: 7) {
                                     Image(systemName: appearance.systemImage)
                                         .font(.caption.weight(.semibold))
-                                        .foregroundStyle(selected ? palette.textPrimary : palette.textSecondary)
+                                        .foregroundStyle(selected ? palette.primaryText(for: tone) : palette.secondaryText(for: tone))
 
                                     Text(appearance.label)
                                         .font(.callout.weight(.semibold))
-                                        .foregroundStyle(palette.textPrimary)
+                                        .foregroundStyle(palette.primaryText(for: tone))
                                         .lineLimit(1)
 
                                     Spacer(minLength: 4)
 
-                                    selectionCheckCircle(selected: selected, palette: palette, size: 17)
+                                    selectionCheckCircle(selected: selected, palette: palette, size: 17, tone: tone)
                                 }
                             }
-                            .padding(12)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .background {
-                                neuSelectableSurface(selected: selected, cornerRadius: 16, palette: palette)
-                            }
-                            .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(NeuSelectableCardButtonStyle(selected: selected, cornerRadius: 16, padding: 12, tone: tone))
                         .nailHoverLift(cornerRadius: 16)
                     }
                 }
@@ -1433,12 +1560,15 @@ struct SettingsView: View {
     }
 
     private func hudLayoutShapeCard(palette: NailPalette) -> some View {
-        TalmoCard {
+        let tone: NeuTone = .porcelain
+        return TalmoCard(tone: tone) {
             VStack(alignment: .leading, spacing: 14) {
                 NailSectionTitle(
                     title: "Bentuk HUD",
                     subtitle: "Pilih geometri HUD mengambang di layar Anda",
-                    icon: "macwindow.on.rectangle"
+                    icon: "macwindow.on.rectangle",
+                    onInk: false,
+                    tone: tone
                 )
 
                 VStack(spacing: 10) {
@@ -1459,24 +1589,19 @@ struct SettingsView: View {
                                 VStack(alignment: .leading, spacing: 3) {
                                     Text(style.label)
                                         .font(.callout.weight(.semibold))
-                                        .foregroundStyle(palette.textPrimary)
+                                        .foregroundStyle(palette.primaryText(for: tone))
                                     Text(style.subtitle)
                                         .font(.caption)
-                                        .foregroundStyle(palette.textSecondary)
+                                        .foregroundStyle(palette.secondaryText(for: tone))
                                         .fixedSize(horizontal: false, vertical: true)
                                 }
 
                                 Spacer(minLength: 8)
 
-                                selectionCheckCircle(selected: selected, palette: palette)
+                                selectionCheckCircle(selected: selected, palette: palette, tone: tone)
                             }
-                            .padding(14)
-                            .background {
-                                neuSelectableSurface(selected: selected, cornerRadius: 16, palette: palette)
-                            }
-                            .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(NeuSelectableCardButtonStyle(selected: selected, cornerRadius: 16, padding: 14, tone: tone))
                         .nailHoverLift(cornerRadius: 16)
                     }
                 }
@@ -1486,13 +1611,8 @@ struct SettingsView: View {
 
     private func hudShapeDiagram(style: HUDLayoutStyle, selected: Bool, palette: NailPalette) -> some View {
         ZStack(alignment: style == .notch ? .top : .center) {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(Color(hex: 0x111111))
+            NeuInsetBackground(cornerRadius: 8, depth: 0.85, tone: .obsidian)
                 .frame(width: 56, height: 38)
-                .overlay {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
-                }
 
             if style == .notch {
                 UnevenRoundedRectangle(
@@ -1502,65 +1622,99 @@ struct SettingsView: View {
                     topTrailingRadius: 0,
                     style: .continuous
                 )
-                .fill(Color(hex: 0xF5F5F5))
+                .fill(
+                    LinearGradient(
+                        colors: [palette.inkCardFill, Color(hex: 0xDDE3EC)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
                 .frame(width: 28, height: 11)
+                .shadow(color: Color.black.opacity(0.45), radius: 2, x: 1, y: 1.5)
             } else {
-                Capsule(style: .continuous)
-                    .fill(Color(hex: 0xF5F5F5))
+                NeuRaisedBackground(isCapsule: true, elevation: 0.55, tone: .porcelain)
                     .frame(width: 32, height: 11)
             }
         }
     }
 
     private func hudBehaviorAndMetricsCard(palette: NailPalette) -> some View {
+        let tone: NeuTone = .porcelain
         let opacityPercent = Int((settings.hudOpacity * 100).rounded())
 
-        return TalmoCard {
+        return TalmoCard(tone: tone) {
             VStack(alignment: .leading, spacing: 14) {
                 NailSectionTitle(
                     title: "Ukuran, Tema & Perilaku HUD",
                     subtitle: "Sesuaikan dimensi, tema aksen, dan respons HUD saat rapat",
-                    icon: "sparkles"
+                    icon: "sparkles",
+                    tone: tone
                 )
 
-                NeuWell(padding: 14, cornerRadius: 16) {
+                NeuWell(padding: 14, cornerRadius: 16, tone: tone) {
                     VStack(alignment: .leading, spacing: 10) {
-                        Picker("Ukuran HUD", selection: $settings.hudSize) {
+                        neuMenuPickerRow(
+                            "Ukuran HUD",
+                            valueLabel: settings.hudSize.label,
+                            systemImage: "arrow.up.left.and.arrow.down.right",
+                            tone: tone,
+                            palette: palette
+                        ) {
                             ForEach(HUDSizePreset.allCases) { preset in
-                                Text(preset.label).tag(preset)
+                                Button {
+                                    settings.hudSize = preset
+                                } label: {
+                                    if preset == settings.hudSize {
+                                        Label(preset.label, systemImage: "checkmark")
+                                    } else {
+                                        Text(preset.label)
+                                    }
+                                }
                             }
                         }
 
                         Divider()
-                            .overlay(palette.hairline)
+                            .overlay(palette.hairline(for: tone))
 
-                        Picker("Tema Warna", selection: $settings.hudAccentTheme) {
+                        neuMenuPickerRow(
+                            "Tema Warna",
+                            valueLabel: settings.hudAccentTheme.label,
+                            systemImage: "paintpalette",
+                            tone: tone,
+                            palette: palette
+                        ) {
                             ForEach(HUDAccentTheme.allCases) { theme in
-                                Text(theme.label).tag(theme)
+                                Button {
+                                    settings.hudAccentTheme = theme
+                                } label: {
+                                    if theme == settings.hudAccentTheme {
+                                        Label(theme.label, systemImage: "checkmark")
+                                    } else {
+                                        Text(theme.label)
+                                    }
+                                }
                             }
                         }
                     }
                 }
 
-                NeuWell(padding: 14, cornerRadius: 16) {
+                NeuWell(padding: 14, cornerRadius: 16, tone: tone) {
                     VStack(alignment: .leading, spacing: 12) {
                         VStack(alignment: .leading, spacing: 6) {
                             HStack {
                                 Text("Lama tampil jawaban")
                                     .font(.callout.weight(.medium))
-                                    .foregroundStyle(palette.textPrimary)
+                                    .foregroundStyle(palette.primaryText(for: tone))
                                 Spacer()
                                 Text("\(settings.hudReplyHoldSeconds) dtk")
                                     .font(.callout.weight(.semibold))
                                     .monospacedDigit()
                                     .contentTransition(.numericText())
-                                    .foregroundStyle(palette.textPrimary)
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 2)
-                                    .background(palette.neuSurfaceGradient, in: Capsule(style: .continuous))
-                                    .overlay {
-                                        Capsule(style: .continuous)
-                                            .strokeBorder(palette.hairlineStrong, lineWidth: 0.8)
+                                    .foregroundStyle(palette.primaryText(for: tone))
+                                    .padding(.horizontal, 9)
+                                    .padding(.vertical, 2.5)
+                                    .background {
+                                        NeuRaisedBackground(isCapsule: true, elevation: 0.42, tone: tone)
                                     }
                                     .animation(
                                         reduceMotion ? nil : .snappy(duration: 0.18),
@@ -1568,13 +1722,14 @@ struct SettingsView: View {
                                     )
                             }
 
-                            Slider(
+                            NeuSlider(
                                 value: Binding(
                                     get: { Double(settings.hudReplyHoldSeconds) },
                                     set: { settings.hudReplyHoldSeconds = Int($0.rounded()) }
                                 ),
                                 in: 2...15,
-                                step: 1
+                                step: 1,
+                                tone: tone
                             )
 
                             HStack {
@@ -1584,29 +1739,27 @@ struct SettingsView: View {
                             }
                             .font(.caption2)
                             .monospacedDigit()
-                            .foregroundStyle(palette.textTertiary)
+                            .foregroundStyle(palette.tertiaryText(for: tone))
                         }
 
                         Divider()
-                            .overlay(palette.hairline)
+                            .overlay(palette.hairline(for: tone))
 
                         VStack(alignment: .leading, spacing: 6) {
                             HStack {
                                 Text("Opasitas HUD")
                                     .font(.callout.weight(.medium))
-                                    .foregroundStyle(palette.textPrimary)
+                                    .foregroundStyle(palette.primaryText(for: tone))
                                 Spacer()
                                 Text("\(opacityPercent)%")
                                     .font(.callout.weight(.semibold))
                                     .monospacedDigit()
                                     .contentTransition(.numericText())
-                                    .foregroundStyle(palette.textPrimary)
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 2)
-                                    .background(palette.neuSurfaceGradient, in: Capsule(style: .continuous))
-                                    .overlay {
-                                        Capsule(style: .continuous)
-                                            .strokeBorder(palette.hairlineStrong, lineWidth: 0.8)
+                                    .foregroundStyle(palette.primaryText(for: tone))
+                                    .padding(.horizontal, 9)
+                                    .padding(.vertical, 2.5)
+                                    .background {
+                                        NeuRaisedBackground(isCapsule: true, elevation: 0.42, tone: tone)
                                     }
                                     .animation(
                                         reduceMotion ? nil : .snappy(duration: 0.18),
@@ -1614,10 +1767,11 @@ struct SettingsView: View {
                                     )
                             }
 
-                            Slider(
+                            NeuSlider(
                                 value: $settings.hudOpacity,
                                 in: 0.75...1.0,
-                                step: 0.05
+                                step: 0.05,
+                                tone: tone
                             )
 
                             HStack {
@@ -1627,34 +1781,46 @@ struct SettingsView: View {
                             }
                             .font(.caption2)
                             .monospacedDigit()
-                            .foregroundStyle(palette.textTertiary)
+                            .foregroundStyle(palette.tertiaryText(for: tone))
                         }
                     }
                 }
 
-                NeuWell(padding: 14, cornerRadius: 16) {
+                NeuWell(padding: 14, cornerRadius: 16, tone: tone) {
                     VStack(alignment: .leading, spacing: 10) {
-                        Toggle("Buka saat kursor diarahkan (Hover)", isOn: $settings.hudExpandOnHover)
-                            .font(.callout.weight(.medium))
+                        neuToggleRow(
+                            "Buka saat kursor diarahkan (Hover)",
+                            isOn: $settings.hudExpandOnHover,
+                            tone: tone,
+                            palette: palette
+                        )
                         Divider()
-                            .overlay(palette.hairline)
-                        Toggle("Buka otomatis saat Nail aktif / bicara", isOn: $settings.hudAutoExpandOnVoice)
-                            .font(.callout.weight(.medium))
+                            .overlay(palette.hairline(for: tone))
+                        neuToggleRow(
+                            "Buka otomatis saat Nail aktif / bicara",
+                            isOn: $settings.hudAutoExpandOnVoice,
+                            tone: tone,
+                            palette: palette
+                        )
                         Divider()
-                            .overlay(palette.hairline)
+                            .overlay(palette.hairline(for: tone))
                         VStack(alignment: .leading, spacing: 4) {
-                            Toggle("Sembunyikan HUD saat Share Screen (Stealth)", isOn: $settings.hudHideFromScreenShare)
-                                .font(.callout.weight(.medium))
+                            neuToggleRow(
+                                "Sembunyikan HUD saat Share Screen (Stealth)",
+                                isOn: $settings.hudHideFromScreenShare,
+                                tone: tone,
+                                palette: palette
+                            )
                             Text("HUD tidak terlihat oleh peserta rapat saat Anda melakukan share screen.")
                                 .font(.caption)
-                                .foregroundStyle(palette.textSecondary)
+                                .foregroundStyle(palette.secondaryText(for: tone))
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                         Divider()
-                            .overlay(palette.hairline)
+                            .overlay(palette.hairline(for: tone))
                         Text("HUD hanya menampilkan karakter Noko-Owl & animasi — detail percakapan ada di jendela Desktop.")
                             .font(.caption)
-                            .foregroundStyle(palette.textSecondary)
+                            .foregroundStyle(palette.secondaryText(for: tone))
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -1689,6 +1855,7 @@ struct SettingsView: View {
                     subtitle: "Runtime Electron tertanam",
                     icon: "macwindow.badge.plus",
                     ok: prerequisites.electronBundled,
+                    tone: .porcelain,
                     palette: palette
                 )
                 .nailHoverLift(cornerRadius: 20)
@@ -1699,6 +1866,7 @@ struct SettingsView: View {
                     subtitle: "Mesin AI cadangan lokal",
                     icon: "terminal.fill",
                     ok: prerequisites.agyInstalled,
+                    tone: .porcelain,
                     palette: palette
                 )
                 .nailHoverLift(cornerRadius: 20)
@@ -1709,6 +1877,7 @@ struct SettingsView: View {
                     subtitle: "Python offline runner",
                     icon: "bolt.horizontal.circle.fill",
                     ok: prerequisites.uvInstalled,
+                    tone: .porcelain,
                     palette: palette
                 )
                 .nailHoverLift(cornerRadius: 20)
@@ -1719,6 +1888,7 @@ struct SettingsView: View {
                     subtitle: "Pemrosesan audio rapat",
                     icon: "waveform.path.ecg",
                     ok: prerequisites.ffmpegInstalled,
+                    tone: .porcelain,
                     palette: palette
                 )
                 .nailHoverLift(cornerRadius: 20)
@@ -1729,6 +1899,7 @@ struct SettingsView: View {
                     subtitle: "Model lokal (\(settings.whisperModel))",
                     icon: "ear.and.waveform",
                     ok: prerequisites.whisperModelCached,
+                    tone: .porcelain,
                     palette: palette
                 )
                 .nailHoverLift(cornerRadius: 20)
@@ -1739,11 +1910,272 @@ struct SettingsView: View {
                     subtitle: "Sesi browser terautentikasi",
                     icon: "person.crop.circle.badge.checkmark",
                     ok: prerequisites.meetProfileExists,
+                    tone: .porcelain,
                     palette: palette
                 )
                 .nailHoverLift(cornerRadius: 20)
                 .nailStaggeredEntrance(delay: 0.20)
             }
+
+            backendIntegrationCard(palette: palette)
+        }
+    }
+
+    private func backendIntegrationCard(palette: NailPalette) -> some View {
+        let config = settings.notulenBackendConfig()
+        let trimmedEndpoint = settings.backendSummaryEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasInvalidEndpoint = !trimmedEndpoint.isEmpty && config.resolvedEndpointURL == nil
+
+        let statusBadge: (text: String, color: Color, icon: String) = {
+            if !config.isConfigured {
+                return ("Menunggu Endpoint", palette.warn, "link.badge.plus")
+            }
+            if config.authScheme.requiresCredential && !hasBackendCredential {
+                return ("Perlu Kredensial", palette.warn, "key.fill")
+            }
+            return ("Siap Kirim", palette.good, "checkmark.circle.fill")
+        }()
+
+        return TalmoCard {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(alignment: .top, spacing: 12) {
+                    NailSectionTitle(
+                        title: "Integrasi API Backend Notulen",
+                        subtitle: "Atur model AI ringkasan, endpoint, & autentikasi untuk mengirim ringkasan rapat",
+                        icon: "paperplane.circle.fill"
+                    )
+
+                    Spacer(minLength: 8)
+
+                    NailStatusBadge(
+                        text: statusBadge.text,
+                        color: statusBadge.color,
+                        icon: statusBadge.icon
+                    )
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Model AI Ringkasan Notulen")
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(palette.textPrimary)
+
+                    Menu {
+                        ForEach(VoiceSettings.summaryModelGroups, id: \.self) { group in
+                            Section(group) {
+                                ForEach(VoiceSettings.summaryModelOptions.filter { $0.group == group }) { option in
+                                    Button {
+                                        settings.summaryModel = option.id
+                                    } label: {
+                                        if option.id == settings.summaryModel {
+                                            Label("\(option.label) (\(option.id))", systemImage: "checkmark")
+                                        } else {
+                                            Text("\(option.label) (\(option.id))")
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "cpu")
+                                .font(.callout.weight(.semibold))
+                                .foregroundStyle(palette.goldBright)
+
+                            Text(VoiceSettings.summaryModelDisplayName(for: settings.summaryModel))
+                                .font(.callout.weight(.medium))
+                                .foregroundStyle(palette.textPrimary)
+                                .lineLimit(1)
+
+                            Text(settings.summaryModel)
+                                .font(.caption.monospaced())
+                                .foregroundStyle(palette.textTertiary)
+                                .lineLimit(1)
+
+                            Spacer(minLength: 8)
+
+                            Image(systemName: "chevron.up.chevron.down")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(palette.textTertiary)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .neuPickerSurface(tone: .porcelain, cornerRadius: 12, elevation: 0.60)
+                        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    }
+                    .menuStyle(.button)
+                    .buttonStyle(.plain)
+                    .menuIndicator(.hidden)
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Endpoint URL (POST)")
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(palette.textPrimary)
+
+                    NeuWell(padding: 10, cornerRadius: 12, tone: .porcelain) {
+                        HStack(spacing: 8) {
+                            NeuChip("POST", tone: .porcelain)
+                                .font(.caption2.monospaced().weight(.bold))
+
+                            TextField(
+                                VoiceSettings.defaultBackendSummaryEndpoint,
+                                text: $settings.backendSummaryEndpoint
+                            )
+                            .textFieldStyle(.plain)
+                            .font(.callout.monospaced())
+                            .foregroundStyle(palette.textPrimary)
+                        }
+                    }
+
+                    if hasInvalidEndpoint {
+                        HStack(spacing: 6) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.caption2)
+                            Text("URL endpoint tidak valid. Gunakan skema http:// atau https:// dengan host yang valid.")
+                                .font(.caption)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .foregroundStyle(palette.bad)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Skema Autentikasi")
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(palette.textPrimary)
+
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        TalmoSegmentedPill(
+                            options: Array(BackendAuthScheme.allCases),
+                            selection: $settings.backendAuthScheme,
+                            compact: true,
+                            tone: .porcelain,
+                            label: { $0.label }
+                        )
+                    }
+                }
+
+                if settings.backendAuthScheme == .apiKeyHeader {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Nama Header Kustom")
+                            .font(.callout.weight(.medium))
+                            .foregroundStyle(palette.textPrimary)
+
+                        TextField("X-API-Key", text: $settings.backendAuthHeaderName)
+                            .textFieldStyle(NeuTextFieldStyle(tone: .porcelain, cornerRadius: 12, horizontalPadding: 12, verticalPadding: 10))
+                            .font(.callout.monospaced())
+                    }
+                }
+
+                if settings.backendAuthScheme.requiresCredential {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 8) {
+                            Text("Kredensial / Token API")
+                                .font(.callout.weight(.medium))
+                                .foregroundStyle(palette.textPrimary)
+
+                            Spacer()
+
+                            NailStatusBadge(
+                                text: hasBackendCredential ? "Tersimpan aman di macOS Keychain" : "Belum tersimpan",
+                                color: hasBackendCredential ? palette.good : palette.warn,
+                                icon: hasBackendCredential ? "lock.shield.fill" : "exclamationmark.triangle"
+                            )
+                        }
+
+                        HStack(spacing: 8) {
+                            SecureField(
+                                hasBackendCredential
+                                    ? "Kredensial tersimpan (isi untuk mengganti)"
+                                    : settings.backendAuthScheme.credentialPlaceholder,
+                                text: $backendCredentialInput
+                            )
+                            .textFieldStyle(NeuTextFieldStyle(tone: .porcelain, cornerRadius: 12, horizontalPadding: 12, verticalPadding: 10))
+                            .font(.callout.monospaced())
+
+                            Button("Simpan ke Keychain") {
+                                saveBackendCredential()
+                            }
+                            .buttonStyle(NailPillButtonStyle(variant: .primary, compact: true))
+                            .disabled(
+                                backendCredentialInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            )
+
+                            Button("Hapus") {
+                                deleteBackendCredential()
+                            }
+                            .buttonStyle(NailPillButtonStyle(variant: .danger, compact: true))
+                            .disabled(!hasBackendCredential)
+                        }
+
+                        if let backendCredentialStatus, !backendCredentialStatus.isEmpty {
+                            Text(backendCredentialStatus)
+                                .font(.caption)
+                                .foregroundStyle(palette.good)
+                        }
+
+                        if let backendCredentialError, !backendCredentialError.isEmpty {
+                            Text(backendCredentialError)
+                                .font(.caption)
+                                .foregroundStyle(palette.bad)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+
+                NeuWell(padding: 12, cornerRadius: 14) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 8) {
+                            Label("Ringkasan Kontrak API", systemImage: "doc.text.magnifyingglass")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(palette.textPrimary)
+
+                            Spacer(minLength: 8)
+
+                            Text("POST · application/json")
+                                .font(.caption2.monospaced().weight(.semibold))
+                                .foregroundStyle(palette.textSecondary)
+                        }
+
+                        Text("Payload JSON: text, title, source")
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(palette.textPrimary)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        Text("Endpoint & kredensial dapat diisi kapan saja saat backend siap. Token disimpan terenkripsi di macOS Keychain.")
+                            .font(.caption)
+                            .foregroundStyle(palette.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+        }
+    }
+
+    private func saveBackendCredential() {
+        let trimmed = backendCredentialInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        if NotulenBackendKeychain.save(trimmed) {
+            hasBackendCredential = true
+            backendCredentialInput = ""
+            backendCredentialError = nil
+            backendCredentialStatus = "Tersimpan aman di macOS Keychain."
+        } else {
+            backendCredentialStatus = nil
+            backendCredentialError = "Gagal menyimpan kredensial ke Keychain macOS."
+        }
+    }
+
+    private func deleteBackendCredential() {
+        if NotulenBackendKeychain.delete() {
+            hasBackendCredential = false
+            backendCredentialInput = ""
+            backendCredentialError = nil
+            backendCredentialStatus = "Kredensial dihapus dari macOS Keychain."
+        } else {
+            backendCredentialStatus = nil
+            backendCredentialError = "Gagal menghapus kredensial dari Keychain macOS."
         }
     }
 
@@ -1766,33 +2198,16 @@ struct SettingsView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 8) {
-                    GeometryReader { geo in
-                        let fillWidth = max(0, geo.size.width * progress)
-                        let tipWidth = min(16.0, fillWidth)
-
-                        ZStack(alignment: .leading) {
-                            Capsule(style: .continuous)
-                                .fill(palette.inkCardTrack)
-                                .frame(height: 8)
-
-                            Capsule(style: .continuous)
-                                .fill(palette.inkCardFill)
-                                .frame(width: fillWidth, height: 8)
-
-                            if fillWidth > 0 {
-                                Capsule(style: .continuous)
-                                    .fill(palette.goldBright)
-                                    .frame(width: tipWidth, height: 8)
-                                    .shadow(color: palette.goldBright.opacity(0.65), radius: 5, x: 0, y: 0)
-                                    .offset(x: max(0, fillWidth - tipWidth))
-                            }
-                        }
-                        .animation(
-                            reduceMotion ? nil : .spring(response: 0.40, dampingFraction: 0.82),
-                            value: readyCount
-                        )
-                    }
-                    .frame(height: 8)
+                    NeuProgressTrack(
+                        progress: progress,
+                        tone: .obsidian,
+                        height: 8,
+                        tint: readyCount == 6 ? palette.inkCardFill : palette.goldBright
+                    )
+                    .animation(
+                        reduceMotion ? nil : .spring(response: 0.40, dampingFraction: 0.82),
+                        value: readyCount
+                    )
 
                     Text(
                         readyCount == 6
@@ -1867,24 +2282,21 @@ struct SettingsView: View {
         subtitle: String,
         icon: String,
         ok: Bool,
+        tone: NeuTone = .porcelain,
         palette: NailPalette
     ) -> some View {
         let dotColor = ok ? palette.good : palette.bad
+        let dotBorder = tone == .obsidian ? palette.obsidianSurfaceTop : palette.card
 
-        return TalmoCard(padding: 16, cornerRadius: 20) {
+        return TalmoCard(padding: 16, cornerRadius: 20, tone: tone) {
             HStack(alignment: .center, spacing: 12) {
                 ZStack(alignment: .bottomTrailing) {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(palette.neuWellGradient)
+                    NeuInsetBackground(cornerRadius: 12, depth: 0.72, tone: tone)
                         .frame(width: 38, height: 38)
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .strokeBorder(palette.hairlineStrong, lineWidth: 1)
-                        }
                         .overlay {
                             Image(systemName: icon)
                                 .font(.system(size: 15, weight: .semibold))
-                                .foregroundStyle(palette.textPrimary)
+                                .foregroundStyle(palette.primaryText(for: tone))
                         }
 
                     Circle()
@@ -1892,7 +2304,7 @@ struct SettingsView: View {
                         .frame(width: 9, height: 9)
                         .overlay {
                             Circle()
-                                .strokeBorder(palette.card, lineWidth: 1.5)
+                                .strokeBorder(dotBorder, lineWidth: 1.5)
                         }
                         .offset(x: 2, y: 2)
                 }
@@ -1900,11 +2312,11 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(title)
                         .font(.callout.weight(.semibold))
-                        .foregroundStyle(palette.textPrimary)
+                        .foregroundStyle(palette.primaryText(for: tone))
                         .lineLimit(1)
                     Text(subtitle)
                         .font(.caption)
-                        .foregroundStyle(palette.textSecondary)
+                        .foregroundStyle(palette.secondaryText(for: tone))
                         .lineLimit(1)
                 }
 
@@ -1917,15 +2329,13 @@ struct SettingsView: View {
 
                     Text(ok ? "Siap" : "Belum")
                         .font(.caption2.weight(.semibold))
-                        .foregroundStyle(ok ? palette.textPrimary : palette.textSecondary)
+                        .foregroundStyle(ok ? palette.primaryText(for: tone) : palette.secondaryText(for: tone))
                         .lineLimit(1)
                 }
                 .padding(.horizontal, 8.5)
                 .padding(.vertical, 3.5)
-                .background(palette.neuWellGradient, in: Capsule(style: .continuous))
-                .overlay {
-                    Capsule(style: .continuous)
-                        .strokeBorder(palette.hairlineStrong, lineWidth: 0.8)
+                .background {
+                    NeuInsetBackground(isCapsule: true, depth: 0.60, tone: tone)
                 }
             }
         }
@@ -1933,66 +2343,73 @@ struct SettingsView: View {
 
     // MARK: - Shared Selection Indicator & Helpers
 
-    @ViewBuilder
-    private func neuSelectableSurface(
-        selected: Bool,
-        cornerRadius: CGFloat = 16,
+    private func neuMenuPickerRow<MenuContent: View>(
+        _ title: String,
+        valueLabel: String,
+        systemImage: String? = nil,
+        tone: NeuTone = .porcelain,
+        palette: NailPalette,
+        @ViewBuilder menuContent: @escaping () -> MenuContent
+    ) -> some View {
+        HStack(spacing: 12) {
+            Text(title)
+                .font(.callout.weight(.medium))
+                .foregroundStyle(palette.primaryText(for: tone))
+                .fixedSize(horizontal: false, vertical: true)
+
+            Spacer(minLength: 8)
+
+            Menu {
+                menuContent()
+            } label: {
+                NeuMenuLabel(valueLabel, systemImage: systemImage, tone: tone, compact: true)
+            }
+            .menuStyle(.button)
+            .buttonStyle(.plain)
+            .menuIndicator(.hidden)
+        }
+    }
+
+    private func neuToggleRow(
+        _ title: String,
+        isOn: Binding<Bool>,
+        tone: NeuTone = .porcelain,
         palette: NailPalette
     ) -> some View {
-        if selected {
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .fill(palette.neuSurfaceGradient)
-                .shadow(
-                    color: palette.neuShadowLight,
-                    radius: palette.isDark ? 4 : 5,
-                    x: -2.5,
-                    y: -2.5
-                )
-                .shadow(
-                    color: palette.neuShadowDark.opacity(palette.isDark ? 0.85 : 0.88),
-                    radius: palette.isDark ? 5 : 6,
-                    x: 3,
-                    y: 3
-                )
-                .overlay {
-                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .strokeBorder(palette.accent, lineWidth: 1.5)
-                }
-        } else {
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .fill(palette.neuWellGradient)
-                .overlay {
-                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .strokeBorder(palette.hairline, lineWidth: 1.0)
-                }
+        HStack(spacing: 12) {
+            Text(title)
+                .font(.callout.weight(.medium))
+                .foregroundStyle(palette.primaryText(for: tone))
+                .fixedSize(horizontal: false, vertical: true)
+
+            Spacer(minLength: 8)
+
+            NeuSwitchToggle(isOn: isOn, tone: tone)
         }
     }
 
     private func selectionCheckCircle(
         selected: Bool,
         palette: NailPalette,
-        size: CGFloat = 20
+        size: CGFloat = 20,
+        tone: NeuTone = .porcelain
     ) -> some View {
-        ZStack {
-            Circle()
-                .fill(selected ? palette.accent : palette.well)
-                .frame(width: size, height: size)
-                .overlay {
-                    Circle()
-                        .strokeBorder(
-                            selected ? palette.accent : palette.hairlineStrong,
-                            lineWidth: selected ? 1.5 : 1.25
-                        )
-                }
-
+        let activeTone: NeuTone = tone == .obsidian ? .porcelain : .obsidian
+        return ZStack {
             if selected {
+                NeuRaisedBackground(isCapsule: true, elevation: 0.68, tone: activeTone)
+                    .frame(width: size, height: size)
+
                 Circle()
-                    .strokeBorder(palette.goldBright.opacity(0.60), lineWidth: 1.0)
+                    .strokeBorder(palette.goldBright.opacity(0.75), lineWidth: 1.0)
                     .frame(width: max(4, size - 5), height: max(4, size - 5))
 
                 Image(systemName: "checkmark")
                     .font(.system(size: size * 0.44, weight: .bold))
-                    .foregroundStyle(palette.accentInk)
+                    .foregroundStyle(palette.primaryText(for: activeTone))
+            } else {
+                NeuInsetBackground(isCapsule: true, depth: 0.70, tone: tone)
+                    .frame(width: size, height: size)
             }
         }
         .animation(reduceMotion ? nil : .spring(response: 0.24, dampingFraction: 0.80), value: selected)
@@ -2004,6 +2421,7 @@ struct SettingsView: View {
             let loadedVoices = TTSVoiceCatalog.listIndonesianVoices()
             let checked = PrerequisiteChecker.check(whisperModel: model)
             let keyExists = ElevenLabsKeychain.hasKey()
+            let backendCredentialExists = NotulenBackendKeychain.hasCredential()
             await MainActor.run {
                 let applyUpdates = {
                     voices = loadedVoices
@@ -2012,6 +2430,7 @@ struct SettingsView: View {
                     }
                     prerequisites = checked
                     hasElevenLabsKey = keyExists
+                    hasBackendCredential = backendCredentialExists
                 }
                 if reduceMotion {
                     applyUpdates()
@@ -2021,6 +2440,74 @@ struct SettingsView: View {
                     }
                 }
             }
+        }
+    }
+}
+
+private struct NeuSelectableCardButtonStyle: ButtonStyle {
+    var selected: Bool
+    var cornerRadius: CGFloat = 16
+    var padding: CGFloat = 14
+    var tone: NeuTone = .porcelain
+    var selectedTone: NeuTone? = nil
+
+    func makeBody(configuration: Configuration) -> some View {
+        CardBody(
+            configuration: configuration,
+            selected: selected,
+            cornerRadius: cornerRadius,
+            padding: padding,
+            tone: tone,
+            selectedTone: selectedTone
+        )
+    }
+
+    private struct CardBody: View {
+        @Environment(\.colorScheme) private var colorScheme
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+        let configuration: Configuration
+        let selected: Bool
+        let cornerRadius: CGFloat
+        let padding: CGFloat
+        let tone: NeuTone
+        let selectedTone: NeuTone?
+
+        var body: some View {
+            let palette = NailPalette(scheme: colorScheme)
+            let activeTone = selected ? (selectedTone ?? tone) : tone
+            let rimColor = activeTone == .obsidian
+                ? palette.goldBright.opacity(0.65)
+                : palette.accent.opacity(palette.isDark ? 0.75 : 0.85)
+
+            configuration.label
+                .padding(padding)
+                .background {
+                    if selected {
+                        NeuRaisedBackground(
+                            cornerRadius: cornerRadius,
+                            elevation: 0.78,
+                            isPressed: configuration.isPressed,
+                            tone: activeTone
+                        )
+                        .overlay {
+                            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                                .strokeBorder(rimColor, lineWidth: 1.4)
+                        }
+                    } else {
+                        NeuInsetBackground(
+                            cornerRadius: cornerRadius,
+                            depth: configuration.isPressed ? 0.92 : 0.72,
+                            tone: tone
+                        )
+                    }
+                }
+                .contentShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+                .scaleEffect(configuration.isPressed && !reduceMotion ? 0.988 : 1.0)
+                .animation(
+                    reduceMotion ? nil : .spring(response: 0.22, dampingFraction: 0.76),
+                    value: configuration.isPressed
+                )
         }
     }
 }

@@ -43,6 +43,7 @@ struct PrerequisiteStatusPill: View {
                     isActive: showingPopover,
                     badgeText: status.allReady ? nil : "\(missingCount)",
                     dotColor: status.allReady ? palette.good : nil,
+                    tone: .porcelain,
                     size: 34,
                     helpText: helpText
                 ) {
@@ -59,58 +60,45 @@ struct PrerequisiteStatusPill: View {
 
                         Text("Sistem")
                             .font(.caption.weight(.medium))
-                            .foregroundStyle(palette.textPrimary)
+                            .foregroundStyle(palette.primaryText(for: .porcelain))
                             .lineLimit(1)
-
-                        Text("\(readyCount)/6")
-                            .font(.caption.weight(.semibold))
-                            .monospacedDigit()
-                            .contentTransition(.numericText())
-                            .foregroundStyle(palette.textSecondary)
-                            .animation(reduceMotion ? nil : .spring(response: 0.30, dampingFraction: 0.82), value: readyCount)
 
                         Spacer(minLength: 4)
 
-                        Circle()
-                            .fill(status.allReady ? palette.good : palette.goldBright)
-                            .frame(width: 6.5, height: 6.5)
+                        HStack(spacing: 5) {
+                            Circle()
+                                .fill(status.allReady ? palette.good : palette.goldBright)
+                                .frame(width: 6, height: 6)
+
+                            Text("\(readyCount)/6")
+                                .font(.caption2.weight(.bold))
+                                .monospacedDigit()
+                                .contentTransition(.numericText())
+                                .foregroundStyle(palette.primaryText(for: .porcelain))
+                                .animation(reduceMotion ? nil : .spring(response: 0.30, dampingFraction: 0.82), value: readyCount)
+                        }
+                        .padding(.horizontal, 7.5)
+                        .padding(.vertical, 3.5)
+                        .background {
+                            NeuRaisedBackground(
+                                isCapsule: true,
+                                elevation: 0.55,
+                                tint: status.allReady ? nil : palette.goldBright,
+                                tone: .porcelain
+                            )
+                        }
                     }
                     .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-                    .background {
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(
-                                LinearGradient(
-                                    colors: (isHovered || showingPopover)
-                                        ? [palette.neuWellTop, palette.neuWellBottom]
-                                        : [palette.neuSurfaceTop, palette.neuSurfaceBottom],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                )
-                            )
-                            .shadow(
-                                color: (isHovered || showingPopover) ? .clear : palette.neuShadowLight,
-                                radius: 3,
-                                x: -2,
-                                y: -2
-                            )
-                            .shadow(
-                                color: (isHovered || showingPopover) ? .clear : palette.neuShadowDark.opacity(0.75),
-                                radius: 4,
-                                x: 2.5,
-                                y: 2.5
-                            )
-                            .overlay {
-                                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                    .strokeBorder(
-                                        status.allReady ? palette.hairline : palette.goldBorder,
-                                        lineWidth: 1
-                                    )
-                            }
-                    }
+                    .padding(.vertical, 7)
                     .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(
+                    PrerequisitePillButtonStyle(
+                        isHovered: isHovered,
+                        isPopoverOpen: showingPopover,
+                        tint: status.allReady ? nil : palette.goldBright
+                    )
+                )
                 .onHover { hovering in
                     if reduceMotion {
                         isHovered = hovering
@@ -140,63 +128,47 @@ struct PrerequisiteStatusPill: View {
         ]
 
         VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 10) {
-                ZStack {
-                    Circle()
-                        .fill(
-                            LinearGradient(
-                                colors: [palette.neuSurfaceTop, palette.neuSurfaceBottom],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
+            TalmoCard(padding: 12, cornerRadius: 14, tone: .porcelain) {
+                HStack(spacing: 10) {
+                    ZStack {
+                        NeuInsetBackground(
+                            isCapsule: true,
+                            depth: 0.72,
+                            tone: .porcelain
                         )
                         .frame(width: 30, height: 30)
-                        .shadow(color: palette.neuShadowLight, radius: 2.5, x: -1.5, y: -1.5)
-                        .shadow(color: palette.neuShadowDark.opacity(0.85), radius: 3, x: 2, y: 2)
-                        .overlay {
-                            Circle()
-                                .strokeBorder(status.allReady ? palette.hairline : palette.goldBorder, lineWidth: 1)
-                        }
-                    Image(systemName: status.allReady ? "checkmark.shield" : "exclamationmark.triangle")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(status.allReady ? palette.good : palette.goldBright)
-                }
+                        Image(systemName: status.allReady ? "checkmark.shield" : "exclamationmark.triangle")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(status.allReady ? palette.good : palette.gold)
+                    }
 
-                Text(status.allReady ? "Semua Prasyarat Siap" : "Prasyarat Sistem")
-                    .font(.system(.headline, design: .serif, weight: .semibold))
-                    .foregroundStyle(palette.textPrimary)
-                    .lineLimit(1)
+                    Text(status.allReady ? "Semua Prasyarat Siap" : "Prasyarat Sistem")
+                        .font(.system(.headline, design: .serif, weight: .semibold))
+                        .foregroundStyle(palette.primaryText(for: .porcelain))
+                        .lineLimit(1)
 
-                Spacer(minLength: 8)
+                    Spacer(minLength: 8)
 
-                HStack(spacing: 5) {
-                    Circle()
-                        .fill(status.allReady ? palette.good : palette.goldBright)
-                        .frame(width: 6, height: 6)
+                    HStack(spacing: 5) {
+                        Circle()
+                            .fill(status.allReady ? palette.good : palette.goldBright)
+                            .frame(width: 6, height: 6)
 
-                    Text("\(readyCount)/6")
-                        .font(.caption2.weight(.bold))
-                        .monospacedDigit()
-                        .contentTransition(.numericText())
-                        .foregroundStyle(palette.textPrimary)
-                }
-                .padding(.horizontal, 8.5)
-                .padding(.vertical, 4)
-                .background(
-                    LinearGradient(
-                        colors: [palette.neuWellTop, palette.neuWellBottom],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    in: Capsule(style: .continuous)
-                )
-                .overlay {
-                    Capsule(style: .continuous)
-                        .strokeBorder(status.allReady ? palette.hairline : palette.goldBorder, lineWidth: 0.9)
+                        Text("\(readyCount)/6")
+                            .font(.caption2.weight(.bold))
+                            .monospacedDigit()
+                            .contentTransition(.numericText())
+                            .foregroundStyle(palette.primaryText(for: .porcelain))
+                    }
+                    .padding(.horizontal, 8.5)
+                    .padding(.vertical, 4)
+                    .background {
+                        NeuRaisedBackground(isCapsule: true, elevation: 0.55, tone: .porcelain)
+                    }
                 }
             }
 
-            NeuWell(padding: 8, cornerRadius: 14) {
+            NeuWell(padding: 8, cornerRadius: 14, tone: .porcelain) {
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(items, id: \.title) { item in
                         HStack(spacing: 9) {
@@ -206,31 +178,39 @@ struct PrerequisiteStatusPill: View {
 
                             Text(item.title)
                                 .font(.caption.weight(item.ready ? .medium : .regular))
-                                .foregroundStyle(item.ready ? palette.textPrimary : palette.textSecondary)
+                                .foregroundStyle(
+                                    item.ready
+                                        ? palette.primaryText(for: .porcelain)
+                                        : palette.secondaryText(for: .porcelain)
+                                )
                                 .lineLimit(1)
 
                             Spacer(minLength: 4)
 
                             Text(item.ready ? "Siap" : "Belum")
                                 .font(.caption2.weight(.semibold))
-                                .foregroundStyle(item.ready ? palette.textTertiary : palette.gold)
+                                .foregroundStyle(
+                                    item.ready
+                                        ? palette.tertiaryText(for: .porcelain)
+                                        : palette.gold
+                                )
                         }
                         .padding(.horizontal, 10)
                         .padding(.vertical, 7)
                         .background {
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .fill(item.ready ? palette.card.opacity(0.82) : palette.goldSoft.opacity(0.55))
-                                .overlay {
-                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                        .strokeBorder(item.ready ? palette.hairline : palette.goldBorder, lineWidth: 1)
-                                }
+                            NeuRaisedBackground(
+                                cornerRadius: 10,
+                                elevation: 0.42,
+                                tint: item.ready ? nil : palette.goldBright,
+                                tone: .porcelain
+                            )
                         }
                     }
                 }
             }
 
             Rectangle()
-                .fill(palette.hairline)
+                .fill(palette.hairline(for: .porcelain))
                 .frame(height: 1)
 
             HStack(spacing: 8) {
@@ -268,6 +248,39 @@ struct PrerequisiteStatusPill: View {
     }
 }
 
+private struct PrerequisitePillButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    let isHovered: Bool
+    let isPopoverOpen: Bool
+    let tint: Color?
+
+    func makeBody(configuration: Configuration) -> some View {
+        let pressed = (configuration.isPressed && isEnabled) || isPopoverOpen
+
+        configuration.label
+            .background {
+                if pressed {
+                    NeuInsetBackground(cornerRadius: 12, depth: 0.72, tone: .porcelain)
+                } else {
+                    NeuRaisedBackground(
+                        cornerRadius: 12,
+                        elevation: isHovered ? 0.74 : 0.60,
+                        tint: tint,
+                        tone: .porcelain
+                    )
+                }
+            }
+            .scaleEffect(configuration.isPressed && isEnabled && !reduceMotion ? 0.97 : 1.0)
+            .opacity(isEnabled ? 1.0 : 0.48)
+            .animation(
+                reduceMotion ? nil : .spring(response: 0.22, dampingFraction: 0.78),
+                value: pressed
+            )
+    }
+}
+
 struct OnboardingBanner: View {
     @Environment(\.colorScheme) private var colorScheme
     let status: PrerequisiteStatus
@@ -280,64 +293,67 @@ struct OnboardingBanner: View {
             let palette = NailPalette(scheme: colorScheme)
             let missing = status.missingItems
 
-            TalmoCard(padding: 15, cornerRadius: 18, surface: .card) {
-                HStack(spacing: 12) {
-                    ZStack {
-                        Circle()
-                            .fill(palette.goldSoft)
-                            .frame(width: 34, height: 34)
-                            .overlay {
-                                Circle()
-                                    .strokeBorder(palette.goldBorder, lineWidth: 1)
-                            }
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.system(size: 13.5, weight: .semibold))
-                            .foregroundStyle(palette.goldBright)
-                    }
-
-                    VStack(alignment: .leading, spacing: 2.5) {
-                        HStack(spacing: 6) {
+            HStack(spacing: 12) {
+                ZStack {
+                    NeuInsetBackground(isCapsule: true, depth: 0.76, tone: .porcelain)
+                        .frame(width: 34, height: 34)
+                        .overlay {
                             Circle()
-                                .fill(palette.goldBright)
-                                .frame(width: 6, height: 6)
-
-                            Text("\(missing.count) prasyarat sistem perlu dilengkapi")
-                                .font(.subheadline.weight(.semibold))
-                                .foregroundStyle(palette.textPrimary)
-                                .lineLimit(1)
+                                .fill(palette.goldBright.opacity(0.16))
                         }
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 13.5, weight: .semibold))
+                        .foregroundStyle(palette.gold)
+                }
 
-                        if let first = missing.first {
-                            let extra = missing.count - 1
-                            Text(extra > 0 ? "\(first) +\(extra) lainnya" : first)
-                                .font(.caption)
-                                .foregroundStyle(palette.textSecondary)
-                                .lineLimit(1)
-                                .truncationMode(.tail)
-                        }
+                VStack(alignment: .leading, spacing: 2.5) {
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(palette.goldBright)
+                            .frame(width: 6, height: 6)
+
+                        Text("\(missing.count) prasyarat sistem perlu dilengkapi")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(palette.primaryText(for: .porcelain))
+                            .lineLimit(1)
                     }
 
-                    Spacer(minLength: 12)
-
-                    HStack(spacing: 8) {
-                        if !status.meetProfileExists {
-                            Button("Login Google") {
-                                onSignIn()
-                            }
-                            .buttonStyle(NailPillButtonStyle(variant: .primary, compact: true))
-                        }
-
-                        Button("Buka Sistem") {
-                            onOpenSettings()
-                        }
-                        .buttonStyle(NailPillButtonStyle(variant: .secondary, compact: true))
+                    if let first = missing.first {
+                        let extra = missing.count - 1
+                        Text(extra > 0 ? "\(first) +\(extra) lainnya" : first)
+                            .font(.caption)
+                            .foregroundStyle(palette.secondaryText(for: .porcelain))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
                     }
                 }
+
+                Spacer(minLength: 4)
+
+                HStack(spacing: 8) {
+                    if !status.meetProfileExists {
+                        Button("Login Google") {
+                            onSignIn()
+                        }
+                        .buttonStyle(NailPillButtonStyle(variant: .primary, compact: true))
+                    }
+
+                    Button("Buka Sistem") {
+                        onOpenSettings()
+                    }
+                    .buttonStyle(NailPillButtonStyle(variant: .secondary, compact: true))
+                }
             }
-            .overlay {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .strokeBorder(palette.goldBorder, lineWidth: 1)
-                    .allowsHitTesting(false)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background {
+                NeuRaisedBackground(
+                    cornerRadius: 18,
+                    elevation: 0.82,
+                    tint: palette.goldBright,
+                    tone: .porcelain
+                )
             }
             .transition(.move(edge: .top).combined(with: .opacity))
         }

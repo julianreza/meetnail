@@ -288,15 +288,43 @@ final class HUDPanel: NSPanel {
         guard isVisible else { return false }
         let activeMode = metrics.displayMode
         let isFloating = VoiceSettings.shared.hudLayoutStyle == .floatingPill
-        let insetX: CGFloat = activeMode == .collapsed ? (isFloating ? 10 : 4) : 12
-        let insetBottom: CGFloat = activeMode == .collapsed ? (isFloating ? 10 : 2) : 10
-        let hitRect = NSRect(
-            x: frame.minX + insetX,
-            y: frame.minY + insetBottom,
-            width: max(1, frame.width - insetX * 2),
-            height: max(1, frame.height - insetBottom)
-        ).insetBy(dx: -6, dy: -6)
-        return hitRect.contains(NSEvent.mouseLocation)
+        let mouse = NSEvent.mouseLocation
+
+        if activeMode == .collapsed {
+            let insetX: CGFloat = isFloating ? 10 : 4
+            let insetBottom: CGFloat = isFloating ? 10 : 2
+            let hitRect = NSRect(
+                x: frame.minX + insetX,
+                y: frame.minY + insetBottom,
+                width: max(1, frame.width - insetX * 2),
+                height: max(1, frame.height - insetBottom)
+            ).insetBy(dx: -6, dy: -6)
+            return hitRect.contains(mouse)
+        }
+
+        let card = Self.cardSize(for: activeMode, metrics: metrics)
+        let cardRect = NSRect(
+            x: frame.midX - card.width * 0.5,
+            y: frame.maxY - card.height - (isFloating ? 1 : 0),
+            width: card.width,
+            height: card.height
+        ).insetBy(dx: -8, dy: -8)
+        if cardRect.contains(mouse) {
+            return true
+        }
+
+        if !isFloating && metrics.hasHardwareNotch {
+            let notchWidth = Self.collapsedWidth(for: metrics)
+            let notchRect = NSRect(
+                x: frame.midX - notchWidth * 0.5,
+                y: frame.maxY - metrics.notchHeight,
+                width: notchWidth,
+                height: metrics.notchHeight
+            ).insetBy(dx: -6, dy: -6)
+            return notchRect.contains(mouse)
+        }
+
+        return false
     }
 
     func show() {
@@ -379,6 +407,7 @@ final class HUDPanel: NSPanel {
         let generation = transitionGeneration
         desiredMode = mode
 
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         let targetFrame = frameFor(mode: mode, preserveTopAnchor: isVisible)
         let isGrowing = targetFrame.width > frame.width || targetFrame.height > frame.height || (metrics.displayMode == .collapsed && mode != .collapsed)
 
@@ -396,7 +425,8 @@ final class HUDPanel: NSPanel {
                         }
                     }
                     self.expandWorkItem = applyModeWork
-                    DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(16), execute: applyModeWork)
+                    let delayMs = reduceMotion ? 0 : 16
+                    DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(delayMs), execute: applyModeWork)
                 }
             }
             expandWorkItem = expandWork
@@ -418,7 +448,8 @@ final class HUDPanel: NSPanel {
                         }
                     }
                     self.shrinkWorkItem = shrinkFrameWork
-                    DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(500), execute: shrinkFrameWork)
+                    let shrinkDelayMs = reduceMotion ? 0 : 480
+                    DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(shrinkDelayMs), execute: shrinkFrameWork)
                 }
             }
             shrinkWorkItem = collapseWork
@@ -557,8 +588,11 @@ final class HUDPanel: NSPanel {
             width = Self.collapsedWidth(for: metrics)
             height = Self.collapsedHeight(for: metrics)
         case .liveActivity, .commandTray:
-            width = card.width + 24
-            height = card.height + 20
+            let minNotchWidth: CGFloat = (!isFloating && metrics.hasHardwareNotch)
+                ? (Self.collapsedWidth(for: metrics) + 16)
+                : 0
+            width = max(card.width + 32, minNotchWidth)
+            height = card.height + 28
         }
 
         if isFloating {

@@ -277,6 +277,15 @@ function installMedia(enableAvatar = false) {
   }
   let activePlayer = null;
   let activePlayDone = null;
+  let lastPlayEndedAt = 0;
+  const activeRecordTrackAttach = new Set();
+  let readRecordingPreview = null;
+  const audioBase64 = data => {
+    const bytes = new Uint8Array(data);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
+    return btoa(binary);
+  };
   let codexInBus = null;
   const codexBusSources = new Map();
   let codexBridge = null;
@@ -502,9 +511,25 @@ function installMedia(enableAvatar = false) {
       let msg;
       try { msg = JSON.parse(ev.data); } catch { return; }
       if (!msg || typeof msg.type !== 'string') return;
+      const eventResponseId = msg.response_id ?? msg.response?.id ?? null;
+      if (msg.type === 'response.created') {
+        bridge.serverResponseInFlight = true;
+        if (msg.response?.id) bridge.activeResponseId = msg.response.id;
+      } else if (msg.type === 'response.done') {
+        bridge.serverResponseInFlight = false;
+        if (!msg.response?.id || bridge.activeResponseId === msg.response.id) {
+          bridge.activeResponseId = null;
+        }
+      }
+      if (!bridge.dcAcceptingTurn) return;
       bridge.dcEvents.push(msg.type);
       if (bridge.dcEvents.length > 40) bridge.dcEvents.shift();
+      if (eventResponseId && bridge.cancelledResponseIds?.has(eventResponseId)) {
+        return;
+      }
       switch (msg.type) {
+        case 'response.created':
+          break;
         case 'response.output_audio_transcript.delta':
         case 'response.audio_transcript.delta':
         case 'response.text.delta':
@@ -517,6 +542,11 @@ function installMedia(enableAvatar = false) {
           bridge.dcReplyDelta = '';
           break;
         case 'response.done':
+          if (msg.response?.status === 'cancelled') {
+            if (msg.response?.id) bridge.cancelledResponseIds?.add(msg.response.id);
+            if (bridge.activeResponseId === msg.response?.id) bridge.activeResponseId = null;
+            break;
+          }
           bridge.dcReplyDone = true;
           if (bridge.dcReplyParts.length === 0 && !bridge.dcReplyDelta.trim() && Array.isArray(msg.response?.output)) {
             for (const outItem of msg.response.output) {
@@ -546,14 +576,27 @@ function installMedia(enableAvatar = false) {
       if (entry) { try { entry.disconnect(); } catch {} codexBusSources.delete(track); }
     }, {once: true});
   };
-  const resetCodexTurnState = () => {
+  const resetCodexTurnState = (acceptTurn = false) => {
     if (!codexBridge) return;
+    codexBridge.dcAcceptingTurn = Boolean(acceptTurn);
+    codexBridge.activeResponseId = null;
     codexBridge.dcHeardParts = [];
     codexBridge.dcHeardDelta = '';
     codexBridge.dcReplyParts = [];
     codexBridge.dcReplyDelta = '';
     codexBridge.dcReplyDone = false;
     codexBridge.dcEvents = [];
+  };
+  const cancelAndClearCodex = () => {
+    if (!codexBridge) return;
+    const b = codexBridge;
+    try { b.inGain.gain.value = 0; } catch {}
+    // Realtime v3 turn cleanup is local. Interrupted sessions are stopped by the app server.
+    if (b.activeResponseId) {
+      b.cancelledResponseIds?.add(b.activeResponseId);
+    }
+    b.serverResponseInFlight = false;
+    resetCodexTurnState(false);
   };
   const destroyCodexBridge = () => {
     abortCodexSpeech?.();
@@ -626,6 +669,9 @@ function installMedia(enableAvatar = false) {
         remote.set(track, {peer, audio});
         attachTrackToCodexBus(track);
         notesAttach(track);
+        for (const attachFn of activeRecordTrackAttach) {
+          try { attachFn(track); } catch {}
+        }
         audio.play().catch(() => {});
         track.addEventListener('ended', () => {
           audio.srcObject = null;
@@ -817,10 +863,16 @@ function installMedia(enableAvatar = false) {
         peers: peerDiags,
       };
     },
-    async record(milliseconds, autoListen = false, idleWaitMs = 12000) {
+    recordingPreview() {
+      return readRecordingPreview?.() ?? '';
+    },
+    async record(milliseconds, autoListen = false, idleWaitMs = 12000, previews = false) {
       await start();
-      if (milliseconds <= 0 || milliseconds > 8000) throw new Error('Invalid capture duration');
+      if (context.state === 'suspended') await context.resume().catch(() => {});
+      if (milliseconds <= 0 || milliseconds > 12000) throw new Error('Invalid capture duration');
       const sources = [];
+      const attachedTracks = new Set();
+      let onTrackAttach = null;
       const rxStats = async () => {
         let packets = 0, energy = 0;
         for (const peer of peers) {
@@ -837,38 +889,65 @@ function installMedia(enableAvatar = false) {
       };
       try {
         const preRoll = context.createDelay(1.0);
-        preRoll.delayTime.value = 0.45;
+        preRoll.delayTime.value = 0.35;
         preRoll.connect(mix);
         const meter = context.createAnalyser();
         meter.fftSize = 1024;
         const meterBuf = new Float32Array(meter.fftSize);
-        for (const track of remote.keys()) if (track.readyState === 'live') {
-          const source = context.createMediaStreamSource(new MediaStream([track]));
-          source.connect(preRoll);
-          source.connect(meter);
-          sources.push(source);
-        }
+        const attachRemoteTrack = track => {
+          if (!track || track.kind !== 'audio' || track.readyState !== 'live' || attachedTracks.has(track)) return;
+          try {
+            const source = context.createMediaStreamSource(new MediaStream([track]));
+            source.connect(preRoll);
+            source.connect(meter);
+            sources.push(source);
+            attachedTracks.add(track);
+          } catch {}
+        };
+        onTrackAttach = attachRemoteTrack;
+        activeRecordTrackAttach.add(onTrackAttach);
+        for (const track of remote.keys()) attachRemoteTrack(track);
         sources.push(preRoll);
-        window.__nailDiagnostics = {tracks: remote.size, live: sources.length - 1,
+        window.__nailDiagnostics = {tracks: remote.size, live: attachedTracks.size,
           muted: [...remote.keys()].filter(t => t.muted).length};
-        if (sources.length <= 1) return '';
+        if (!attachedTracks.size && !autoListen) {
+          // Wait briefly for newly arriving live tracks if manual turn was triggered during renegotiation.
+        }
+        if (!attachedTracks.size && autoListen) return '';
         const before = await rxStats();
         const maxIdleTicks = Math.max(1, Math.round(idleWaitMs / 100));
         const recorder = new MediaRecorder(mix.stream, {mimeType: 'audio/webm;codecs=opus', audioBitsPerSecond: 64000});
+        const startRecorder = () => previews ? recorder.start(400) : recorder.start();
+        let wasAutoListen = autoListen;
         const blob = await new Promise((resolve, reject) => {
           const chunks = [];
-          let ticks = 0, voicedTicks = 0, silentTicks = 0, started = !autoListen, aborted = false;
+          let ticks = 0, speechTicks = 0, voicedTicks = 0, silentTicks = 0, onsetStreak = 0;
+          let noiseFloor = 0.003;
+          let started = !autoListen, aborted = false;
           let poll = null;
           const finish = val => {
             if (poll) { clearInterval(poll); poll = null; }
+            if (previews) readRecordingPreview = null;
             window.__nailUpgradeRecord = null;
             window.__nailAbortRecord = null;
             resolve(val);
           };
+          if (previews) {
+            let readChunks = 0;
+            readRecordingPreview = async () => {
+              if (aborted || voicedTicks < 3 || chunks.length === readChunks || recorder.state !== 'recording') return '';
+              readChunks = chunks.length;
+              return audioBase64(await new Blob(chunks).arrayBuffer());
+            };
+          }
           window.__nailUpgradeRecord = () => {
             autoListen = false;
+            wasAutoListen = false;
             ticks = 0;
-            if (!started && recorder.state === 'inactive') { started = true; recorder.start(); }
+            speechTicks = 0;
+            silentTicks = 0;
+            if (!started && recorder.state === 'inactive') { started = true; startRecorder(); }
+            return true;
           };
           window.__nailAbortRecord = () => {
             aborted = true;
@@ -880,7 +959,10 @@ function installMedia(enableAvatar = false) {
           };
           poll = setInterval(() => {
             ticks++;
-            if (started && recorder.state === 'recording' && ticks >= Math.round(milliseconds / 100)) {
+            if (voicedTicks > 0) speechTicks++;
+            window.__nailDiagnostics = {tracks: remote.size, live: attachedTracks.size,
+              muted: [...remote.keys()].filter(t => t.muted).length};
+            if (started && recorder.state === 'recording' && voicedTicks > 0 && speechTicks >= Math.round(milliseconds / 100)) {
               recorder.stop();
               return;
             }
@@ -888,31 +970,59 @@ function installMedia(enableAvatar = false) {
             let sum = 0;
             for (let i = 0; i < meterBuf.length; i++) sum += meterBuf[i] * meterBuf[i];
             const rms = Math.sqrt(sum / meterBuf.length);
-            if (rms >= 0.004) {
-              if (!started && recorder.state === 'inactive') { started = true; ticks = 0; recorder.start(); }
+            const inEchoGuard = autoListen && (Date.now() - lastPlayEndedAt < 450);
+            const startThreshold = autoListen ? Math.max(0.0055, noiseFloor * 1.8) : 0.0035;
+            const sustainThreshold = autoListen ? Math.max(0.004, noiseFloor * 1.45) : 0.003;
+            if (!started) {
+              if (!inEchoGuard && rms >= startThreshold) {
+                onsetStreak++;
+                if (onsetStreak >= 2 || rms >= 0.015) {
+                  started = true;
+                  ticks = 0;
+                  speechTicks = 0;
+                  voicedTicks = onsetStreak;
+                  silentTicks = 0;
+                  startRecorder();
+                }
+              } else {
+                onsetStreak = 0;
+                noiseFloor = Math.min(0.004, Math.max(0.002, noiseFloor * 0.9 + rms * 0.1));
+                if (ticks >= maxIdleTicks) {
+                  finish(null);
+                }
+              }
+            } else if (rms >= sustainThreshold) {
+              if (voicedTicks === 0) speechTicks = 0;
               voicedTicks++;
               silentTicks = 0;
-            } else if (started && recorder.state === 'recording') {
-              if (voicedTicks >= 3 && ++silentTicks >= 11) recorder.stop();
-            } else if (!started && ticks >= maxIdleTicks) {
-              finish(null);
+            } else if (recorder.state === 'recording') {
+              silentTicks++;
+              if (autoListen && voicedTicks < 3 && silentTicks >= 4) {
+                aborted = true;
+                recorder.stop();
+              } else if (voicedTicks >= (autoListen ? 3 : 2) && silentTicks >= 7) {
+                recorder.stop();
+              } else if (!autoListen && voicedTicks === 0 && ticks >= maxIdleTicks) {
+                recorder.stop();
+              }
             }
           }, 100);
-          recorder.ondataavailable = e => chunks.push(e.data);
+          recorder.ondataavailable = e => { if (e.data.size !== 0) chunks.push(e.data); };
           recorder.onstop = () => finish(aborted ? null : new Blob(chunks));
           recorder.onerror = () => {
             if (poll) { clearInterval(poll); poll = null; }
+            if (previews) readRecordingPreview = null;
             window.__nailUpgradeRecord = null;
             window.__nailAbortRecord = null;
             reject(new Error('Recorder failed'));
           };
-          if (started) recorder.start();
+          if (started) startRecorder();
         });
         if (!blob) return '';
-        const after = await rxStats();
         const data = await blob.arrayBuffer();
         const decoded = await context.decodeAudioData(data.slice(0));
         const width = Math.round(decoded.sampleRate * 0.02);
+        const frameThreshold = wasAutoListen ? 0.0045 : 0.003;
         let voicedFrames = 0, peak = 0;
         for (let offset = 0; offset + width <= decoded.length; offset += width) {
           let energy = 0;
@@ -923,49 +1033,53 @@ function installMedia(enableAvatar = false) {
               peak = Math.max(peak, Math.abs(samples[i]));
             }
           }
-          if (energy >= width * decoded.numberOfChannels * 0.003 ** 2) voicedFrames++;
+          if (energy >= width * decoded.numberOfChannels * frameThreshold ** 2) voicedFrames++;
+        }
+        const minVoicedFrames = wasAutoListen ? 7 : 3;
+        if (voicedFrames < minVoicedFrames) {
+          const after = await rxStats();
+          Object.assign(window.__nailDiagnostics, {peak: Math.round(20 * Math.log10(peak || 1e-9)),
+            voicedFrames, seconds: Math.round(decoded.duration * 10) / 10,
+            rxPackets: after.packets - before.packets,
+            rxEnergy: Math.round((after.energy - before.energy) * 1000) / 1000});
+          const inbound = [];
+          for (const peer of peers) {
+            try {
+              const receivers = peer.getReceivers().filter(r => r.track?.kind === 'audio').map(r => ({
+                id: r.track.id, muted: r.track.muted, enabled: r.track.enabled, state: r.track.readyState,
+                transform: Boolean(r.transform), ssrcs: r.getSynchronizationSources?.().length ?? -1,
+              }));
+              const transceivers = peer.getTransceivers().filter(t => t.receiver?.track?.kind === 'audio').map(t => ({
+                mid: t.mid, dir: t.direction, cur: t.currentDirection, stopped: t.stopped,
+              }));
+              const codecs = new Map();
+              const stats = [...(await peer.getStats()).values()];
+              for (const s of stats) if (s.type === 'codec') codecs.set(s.id, s.mimeType);
+              for (const r of stats) {
+                if (r.type === 'inbound-rtp' && r.kind === 'audio') inbound.push({
+                  ssrc: r.ssrc, mid: r.mid, pkts: r.packetsReceived, lost: r.packetsLost, discarded: r.packetsDiscarded,
+                  bytes: r.bytesReceived, samples: r.totalSamplesReceived, concealed: r.concealedSamples,
+                  level: r.audioLevel, energy: r.totalAudioEnergy,
+                  decoder: r.decoderImplementation, codec: codecs.get(r.codecId), emitted: r.jitterBufferEmittedCount});
+              }
+              const audioStates = [...remote.values()].filter(e => e.peer === peer).map(e => ({
+                paused: e.audio.paused, muted: e.audio.muted, ready: e.audio.readyState, err: e.audio.error?.message,
+              }));
+              const playout = stats.filter(s => s.type === 'media-playout').map(s => ({
+                dur: s.totalSamplesDuration, synth: s.synthesizedSamplesDuration,
+              }));
+              inbound.push({peerState: peer.connectionState, ua: navigator.userAgent, ctxState: context?.state, ctxTime: context?.currentTime,
+                receivers, transceivers, audioStates, playout, encStats, diagLog: diagLog.slice(-20)});
+            } catch {}
+          }
+          window.__nailInbound = inbound;
+          return '';
         }
         Object.assign(window.__nailDiagnostics, {peak: Math.round(20 * Math.log10(peak || 1e-9)),
-          voicedFrames, seconds: Math.round(decoded.duration * 10) / 10,
-          rxPackets: after.packets - before.packets,
-          rxEnergy: Math.round((after.energy - before.energy) * 1000) / 1000});
-        const inbound = [];
-        for (const peer of peers) {
-          try {
-            const receivers = peer.getReceivers().filter(r => r.track?.kind === 'audio').map(r => ({
-              id: r.track.id, muted: r.track.muted, enabled: r.track.enabled, state: r.track.readyState,
-              transform: Boolean(r.transform), ssrcs: r.getSynchronizationSources?.().length ?? -1,
-            }));
-            const transceivers = peer.getTransceivers().filter(t => t.receiver?.track?.kind === 'audio').map(t => ({
-              mid: t.mid, dir: t.direction, cur: t.currentDirection, stopped: t.stopped,
-            }));
-            const codecs = new Map();
-            const stats = [...(await peer.getStats()).values()];
-            for (const s of stats) if (s.type === 'codec') codecs.set(s.id, s.mimeType);
-            for (const r of stats) {
-              if (r.type === 'inbound-rtp' && r.kind === 'audio') inbound.push({
-                ssrc: r.ssrc, mid: r.mid, pkts: r.packetsReceived, lost: r.packetsLost, discarded: r.packetsDiscarded,
-                bytes: r.bytesReceived, samples: r.totalSamplesReceived, concealed: r.concealedSamples,
-                level: r.audioLevel, energy: r.totalAudioEnergy,
-                decoder: r.decoderImplementation, codec: codecs.get(r.codecId), emitted: r.jitterBufferEmittedCount});
-            }
-            const audioStates = [...remote.values()].filter(e => e.peer === peer).map(e => ({
-              paused: e.audio.paused, muted: e.audio.muted, ready: e.audio.readyState, err: e.audio.error?.message,
-            }));
-            const playout = stats.filter(s => s.type === 'media-playout').map(s => ({
-              dur: s.totalSamplesDuration, synth: s.synthesizedSamplesDuration,
-            }));
-            inbound.push({peerState: peer.connectionState, ua: navigator.userAgent, ctxState: context?.state, ctxTime: context?.currentTime,
-              receivers, transceivers, audioStates, playout, encStats, diagLog: diagLog.slice(-20)});
-          } catch {}
-        }
-        window.__nailInbound = inbound;
-        if (voicedFrames < 5) return '';
-        const bytes = new Uint8Array(data);
-        let binary = '';
-        for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
-        return btoa(binary);
+          voicedFrames, seconds: Math.round(decoded.duration * 10) / 10});
+        return audioBase64(data);
       } finally {
+        if (onTrackAttach) activeRecordTrackAttach.delete(onTrackAttach);
         for (const source of sources) source.disconnect();
       }
     },
@@ -986,6 +1100,7 @@ function installMedia(enableAvatar = false) {
           const done = () => {
             if (settled) return;
             settled = true;
+            lastPlayEndedAt = Date.now();
             if (activePlayer === player) activePlayer = null;
             if (activePlayDone === done) activePlayDone = null;
             try { player.disconnect(); } catch {}
@@ -1003,6 +1118,7 @@ function installMedia(enableAvatar = false) {
     stopPlay() {
       const player = activePlayer;
       const done = activePlayDone;
+      lastPlayEndedAt = Date.now();
       if (player) { try { player.stop(); } catch {} }
       if (done) done();
       restoreTeamsSenders().catch(() => {});
@@ -1028,7 +1144,7 @@ function installMedia(enableAvatar = false) {
       const outMeter = context.createAnalyser();
       outMeter.fftSize = 1024;
       const outDelay = context.createDelay(1.0);
-      outDelay.delayTime.value = 0.30;
+      outDelay.delayTime.value = 0.06;
       const outGain = context.createGain();
       outGain.gain.value = 0;
       outDelay.connect(outGain);
@@ -1041,6 +1157,7 @@ function installMedia(enableAvatar = false) {
         pc, dc, inPreRoll, inGain, inDest, inMeter, inBuf: new Float32Array(inMeter.fftSize),
         outMeter, outBuf: new Float32Array(outMeter.fftSize), outDelay, outGain,
         outSource: null, outTrack: null, replyAudio: null,
+        dcAcceptingTurn: false, serverResponseInFlight: false, activeResponseId: null, cancelledResponseIds: new Set(),
         dcHeardParts: [], dcHeardDelta: '', dcReplyParts: [], dcReplyDelta: '',
         dcReplyDone: false, dcEvents: [], wiredChannels: null,
       };
@@ -1088,13 +1205,13 @@ function installMedia(enableAvatar = false) {
           pc.onicecandidate = null;
           resolve();
         };
-        const hardTimer = setTimeout(finish, 1800);
+        const hardTimer = setTimeout(finish, 1200);
         pc.onicegatheringstatechange = () => { if (pc.iceGatheringState === 'complete') finish(); };
         pc.onicecandidate = ev => {
           if (!ev.candidate) { finish(); return; }
           const cand = ev.candidate.candidate || '';
           if (!srflxTimer && (ev.candidate.type === 'srflx' || ev.candidate.type === 'relay' || /\btyp (srflx|relay)\b/.test(cand))) {
-            srflxTimer = setTimeout(finish, 250);
+            srflxTimer = setTimeout(finish, 150);
           }
         };
       });
@@ -1108,14 +1225,16 @@ function installMedia(enableAvatar = false) {
       if (!codexBridge) throw new Error('voice-codex-connection');
       for (const track of remote.keys()) attachTrackToCodexBus(track);
       const bridge = codexBridge;
-      resetCodexTurnState();
-      bridge.inGain.gain.value = 1;
+      resetCodexTurnState(true);
+      bridge.inGain.gain.value = 0;
       const requiredSilentTicks = Math.max(2, Math.ceil(silenceMs / 80));
       return await new Promise(resolve => {
         const startedAt = Date.now();
         let voiceStartedAt = 0;
         let voicedTicks = 0;
         let silentTicks = 0;
+        let onsetStreak = 0;
+        let noiseFloor = 0.003;
         let peak = 0;
         let settled = false;
         const cleanup = (aborted = false) => {
@@ -1124,7 +1243,11 @@ function installMedia(enableAvatar = false) {
           clearInterval(poll);
           if (abortCodexSpeech === onAbort) abortCodexSpeech = null;
           try { bridge.inGain.gain.value = 0; } catch {}
-          resolve({spoke: voicedTicks >= 2, aborted, peak, ms: Date.now() - startedAt, liveTracks: remote.size});
+          const spoke = voicedTicks >= 2;
+          if (!spoke || aborted) {
+            bridge.dcAcceptingTurn = false;
+          }
+          resolve({spoke, aborted, peak, ms: Date.now() - startedAt, liveTracks: remote.size});
         };
         const onAbort = () => cleanup(true);
         abortCodexSpeech = onAbort;
@@ -1136,17 +1259,32 @@ function installMedia(enableAvatar = false) {
           const rms = Math.sqrt(sum / bridge.inBuf.length);
           peak = Math.max(peak, rms);
           const now = Date.now();
+          const onsetThreshold = Math.max(0.0055, noiseFloor * 1.8);
           const silenceThreshold = voicedTicks >= 2 && peak > 0.03
-            ? Math.max(0.004, Math.min(0.012, peak * 0.12))
-            : 0.004;
-          if (rms >= silenceThreshold) {
-            if (!voiceStartedAt) voiceStartedAt = now;
-            voicedTicks++;
-            silentTicks = 0;
-          } else if (voicedTicks >= 2) {
-            if (++silentTicks >= requiredSilentTicks) { cleanup(false); return; }
+            ? Math.max(0.0045, Math.min(0.011, peak * 0.14))
+            : Math.max(0.004, noiseFloor * 1.45);
+          const activeThreshold = voiceStartedAt ? silenceThreshold : onsetThreshold;
+          if (rms >= activeThreshold) {
+            if (!voiceStartedAt) {
+              onsetStreak++;
+              if (onsetStreak >= 2 || rms >= 0.015) {
+                voiceStartedAt = now;
+                bridge.inGain.gain.value = 1;
+                voicedTicks = onsetStreak;
+                silentTicks = 0;
+              }
+            } else {
+              voicedTicks++;
+              silentTicks = 0;
+            }
+          } else {
+            onsetStreak = 0;
+            if (!voiceStartedAt) {
+              noiseFloor = Math.min(0.0038, Math.max(0.002, noiseFloor * 0.9 + rms * 0.1));
+            }
+            if (voiceStartedAt && ++silentTicks >= requiredSilentTicks) { cleanup(false); return; }
           }
-          if (voicedTicks >= 2) {
+          if (voicedTicks >= 2 && silentTicks >= 2) {
             bridge.outMeter.getFloatTimeDomainData(bridge.outBuf);
             let outSum = 0;
             for (let i = 0; i < bridge.outBuf.length; i++) outSum += bridge.outBuf[i] * bridge.outBuf[i];
@@ -1162,6 +1300,7 @@ function installMedia(enableAvatar = false) {
       });
     },
     codexResetTurnState: resetCodexTurnState,
+    codexCancelAndClear: cancelAndClearCodex,
     codexCloseIn() {
       if (codexBridge) codexBridge.inGain.gain.value = 0;
     },
@@ -1180,7 +1319,11 @@ function installMedia(enableAvatar = false) {
       if (codexBridge) codexBridge.outGain.gain.value = 1;
     },
     async codexCloseOut() {
-      if (codexBridge) codexBridge.outGain.gain.value = 0;
+      if (codexBridge) {
+        if (codexBridge.outGain.gain.value > 0) lastPlayEndedAt = Date.now();
+        codexBridge.outGain.gain.value = 0;
+        codexBridge.dcAcceptingTurn = false;
+      }
       await restoreTeamsSenders();
     },
     async codexState() {
@@ -1226,18 +1369,14 @@ function installMedia(enableAvatar = false) {
         dcHeard,
         dcReply,
         dcReplyDone: Boolean(bridge.dcReplyDone),
+        serverResponseInFlight: Boolean(bridge.serverResponseInFlight),
         dcEvents: bridge.dcEvents.slice(-12),
       };
     },
     codexInterrupt() {
       if (codexBridge) {
-        try { codexBridge.inGain.gain.value = 0; } catch {}
         try { codexBridge.outGain.gain.value = 0; } catch {}
-        try {
-          if (codexBridge.dc?.readyState === 'open') {
-            codexBridge.dc.send(JSON.stringify({type: 'response.cancel'}));
-          }
-        } catch {}
+        cancelAndClearCodex();
       }
       restoreTeamsSenders().catch(() => {});
       abortCodexSpeech?.();

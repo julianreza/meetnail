@@ -355,6 +355,78 @@ final class VoiceSettings {
         "gemini-4-argon-low",
     ]
 
+    enum SummaryModelBackend: String, Codable, Equatable, Sendable {
+        case antigravity
+        case codex
+        case local
+    }
+
+    struct SummaryModelOption: Identifiable, Equatable, Sendable {
+        let id: String
+        let label: String
+        let group: String
+        let backend: SummaryModelBackend
+    }
+
+    nonisolated static let defaultSummaryModel = "gemini-4-hydrogen-high"
+    nonisolated static let defaultBackendSummaryEndpoint = NotulenBackendClient.defaultEndpointURLString
+
+    nonisolated static let summaryModelOptions: [SummaryModelOption] = [
+        // Antigravity (Google AI Pro)
+        SummaryModelOption(id: "gemini-4-hydrogen-high", label: "Gemini 4 Hydrogen (High)", group: "Gemini 4 Hydrogen", backend: .antigravity),
+        SummaryModelOption(id: "gemini-4-hydrogen-medium", label: "Gemini 4 Hydrogen (Medium)", group: "Gemini 4 Hydrogen", backend: .antigravity),
+        SummaryModelOption(id: "gemini-4-hydrogen-low", label: "Gemini 4 Hydrogen (Low)", group: "Gemini 4 Hydrogen", backend: .antigravity),
+        SummaryModelOption(id: "gemini-4-neon-high", label: "Gemini 4 Neon (High)", group: "Gemini 4 Neon & Argon", backend: .antigravity),
+        SummaryModelOption(id: "gemini-4-neon-medium", label: "Gemini 4 Neon (Medium)", group: "Gemini 4 Neon & Argon", backend: .antigravity),
+        SummaryModelOption(id: "gemini-4-neon-low", label: "Gemini 4 Neon (Low)", group: "Gemini 4 Neon & Argon", backend: .antigravity),
+        SummaryModelOption(id: "gemini-4-argon-high", label: "Gemini 4 Argon (High)", group: "Gemini 4 Neon & Argon", backend: .antigravity),
+        SummaryModelOption(id: "gemini-4-argon-medium", label: "Gemini 4 Argon (Medium)", group: "Gemini 4 Neon & Argon", backend: .antigravity),
+        SummaryModelOption(id: "gemini-4-argon-low", label: "Gemini 4 Argon (Low)", group: "Gemini 4 Neon & Argon", backend: .antigravity),
+        SummaryModelOption(id: "gemini-3.8-flash-high", label: "Gemini 3.8 Flash (High)", group: "Gemini 3.8 Flash", backend: .antigravity),
+        SummaryModelOption(id: "gemini-3.8-flash-medium", label: "Gemini 3.8 Flash (Medium)", group: "Gemini 3.8 Flash", backend: .antigravity),
+        SummaryModelOption(id: "gemini-3.8-flash-low", label: "Gemini 3.8 Flash (Low)", group: "Gemini 3.8 Flash", backend: .antigravity),
+        SummaryModelOption(id: "claude-sonnet-5-5-high", label: "Claude Sonnet 5.5 (High)", group: "Claude 5.5", backend: .antigravity),
+        SummaryModelOption(id: "claude-sonnet-5-5-medium", label: "Claude Sonnet 5.5 (Medium)", group: "Claude 5.5", backend: .antigravity),
+        SummaryModelOption(id: "claude-opus-5-5-high", label: "Claude Opus 5.5 (High)", group: "Claude 5.5", backend: .antigravity),
+        SummaryModelOption(id: "claude-opus-5-5-medium", label: "Claude Opus 5.5 (Medium)", group: "Claude 5.5", backend: .antigravity),
+        // ChatGPT (Codex)
+        SummaryModelOption(id: "gpt-6.2-sol", label: "GPT-6.2 Sol", group: "ChatGPT (Codex)", backend: .codex),
+        SummaryModelOption(id: "gpt-6.2-astra", label: "GPT-6.2 Astra", group: "ChatGPT (Codex)", backend: .codex),
+        SummaryModelOption(id: "gpt-6.1-terra", label: "GPT-6.1 Terra", group: "ChatGPT (Codex)", backend: .codex),
+        SummaryModelOption(id: "gpt-6.1-sol", label: "GPT-6.1 Sol", group: "ChatGPT (Codex)", backend: .codex),
+        SummaryModelOption(id: "gpt-6-astra", label: "GPT-6 Astra", group: "ChatGPT (Codex)", backend: .codex),
+        SummaryModelOption(id: "gpt-6-sol", label: "GPT-6 Sol", group: "ChatGPT (Codex)", backend: .codex),
+        SummaryModelOption(id: "gpt-6-luna", label: "GPT-6 Luna", group: "ChatGPT (Codex)", backend: .codex),
+        SummaryModelOption(id: "gpt-5.6-sol", label: "GPT-5.6 Sol", group: "ChatGPT (Codex)", backend: .codex),
+        // Offline Lokal
+        SummaryModelOption(id: "ringkasan-lokal", label: "Offline Lokal (Tanpa AI)", group: "Lokal", backend: .local),
+    ]
+
+    nonisolated static let summaryModelGroups: [String] = [
+        "ChatGPT (Codex)",
+        "Gemini 4 Hydrogen",
+        "Gemini 4 Neon & Argon",
+        "Gemini 3.8 Flash",
+        "Claude 5.5",
+        "Lokal",
+    ]
+
+    nonisolated static func summaryModelDisplayName(for id: String) -> String {
+        summaryModelOptions.first(where: { $0.id == id })?.label ?? id
+    }
+
+    nonisolated static func summaryModelBackend(for id: String) -> SummaryModelBackend {
+        if let option = summaryModelOptions.first(where: { $0.id == id }) {
+            return option.backend
+        }
+        let lower = id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if lower == "ringkasan-lokal" { return .local }
+        if lower.hasPrefix("gpt-") || lower.hasPrefix("codex") || lower.hasPrefix("o1") || lower.hasPrefix("o3") || lower.hasPrefix("o4") {
+            return .codex
+        }
+        return .antigravity
+    }
+
     static let whisperModelOptions: [String] = ["small", "base"]
 
     static let codexPrimaryVoiceOptions: [String] = [
@@ -397,6 +469,10 @@ final class VoiceSettings {
         static let hudReplyHoldSeconds = "nail.hud.replyHoldSeconds"
         static let hudOpacity = "nail.hud.opacity"
         static let hudHideFromScreenShare = "nail.hud.hideFromScreenShare"
+        static let backendSummaryEndpoint = "nail.backend.summaryEndpoint"
+        static let backendAuthScheme = "nail.backend.authScheme"
+        static let backendAuthHeaderName = "nail.backend.authHeaderName"
+        static let summaryModel = "nail.notulen.summaryModel"
     }
 
     var provider: VoiceProvider {
@@ -503,6 +579,22 @@ final class VoiceSettings {
         didSet { defaults.set(hudHideFromScreenShare, forKey: Keys.hudHideFromScreenShare) }
     }
 
+    var backendSummaryEndpoint: String {
+        didSet { defaults.set(backendSummaryEndpoint, forKey: Keys.backendSummaryEndpoint) }
+    }
+
+    var backendAuthScheme: BackendAuthScheme {
+        didSet { defaults.set(backendAuthScheme.rawValue, forKey: Keys.backendAuthScheme) }
+    }
+
+    var backendAuthHeaderName: String {
+        didSet { defaults.set(backendAuthHeaderName, forKey: Keys.backendAuthHeaderName) }
+    }
+
+    var summaryModel: String {
+        didSet { defaults.set(summaryModel, forKey: Keys.summaryModel) }
+    }
+
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         let rawProvider = defaults.string(forKey: Keys.provider) ?? ""
@@ -556,6 +648,27 @@ final class VoiceSettings {
         let storedOpacity = defaults.object(forKey: Keys.hudOpacity) as? Double ?? 1.0
         self.hudOpacity = min(max(storedOpacity, 0.75), 1.0)
         self.hudHideFromScreenShare = defaults.object(forKey: Keys.hudHideFromScreenShare) as? Bool ?? true
+        let storedBackendEndpoint = (defaults.string(forKey: Keys.backendSummaryEndpoint) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        self.backendSummaryEndpoint = storedBackendEndpoint.isEmpty
+            ? Self.defaultBackendSummaryEndpoint
+            : storedBackendEndpoint
+        let rawAuthScheme = defaults.string(forKey: Keys.backendAuthScheme) ?? ""
+        self.backendAuthScheme = BackendAuthScheme(rawValue: rawAuthScheme) ?? .none
+        let storedHeaderName = (defaults.string(forKey: Keys.backendAuthHeaderName) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        self.backendAuthHeaderName = storedHeaderName.isEmpty ? "X-API-Key" : storedHeaderName
+        let storedSummaryModel = (defaults.string(forKey: Keys.summaryModel) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        self.summaryModel = storedSummaryModel.isEmpty ? Self.defaultSummaryModel : storedSummaryModel
+    }
+
+    func notulenBackendConfig() -> NotulenBackendConfig {
+        NotulenBackendConfig(
+            endpointURLString: backendSummaryEndpoint,
+            authScheme: backendAuthScheme,
+            customAuthHeaderName: backendAuthHeaderName
+        )
     }
 
     func runtimeConfig() -> VoiceRuntimeConfig {
