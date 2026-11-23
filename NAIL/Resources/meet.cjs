@@ -1,8 +1,8 @@
 const electron = process.versions.electron ? require('electron') : {};
 const { app, BrowserWindow } = electron;
-const { mkdirSync, appendFileSync, writeFileSync } = require('node:fs');
+const { existsSync, mkdirSync, appendFileSync, writeFileSync } = require('node:fs');
 const { appendFile, mkdtemp, readFile, rm, writeFile, stat } = require('node:fs/promises');
-const { join } = require('node:path');
+const { dirname, join } = require('node:path');
 const { homedir, tmpdir } = require('node:os');
 const { execFile, spawn } = require('node:child_process');
 const { promisify } = require('node:util');
@@ -823,6 +823,487 @@ function createAgyDaemonClient({spawnWorker = spawn, pipeline, runtimeConfig = {
   };
 }
 
+function resolveCodexWakeWhisperModel(configOrModel = {}, maybeOpts = {}) {
+  const isStringModel = typeof configOrModel === 'string';
+  const opts = isStringModel
+    ? (typeof maybeOpts === 'function' ? {existsSync: maybeOpts} : (maybeOpts || {}))
+    : (configOrModel || {});
+  const configured = isStringModel ? configOrModel : opts.whisperModel;
+  const checkExists = typeof opts.existsSync === 'function' ? opts.existsSync : existsSync;
+  const baseDir = opts.baseCachePath || join(opts.homeDir || homedir(), '.cache/huggingface/hub/models--Systran--faster-whisper-base');
+  try {
+    if (checkExists(baseDir)) return 'base';
+  } catch {}
+  return (typeof configured === 'string' && configured.trim()) ? configured.trim() : 'small';
+}
+
+function createWakePriorityGate({defaultMaxWaitMs = 1500} = {}) {
+  let activeCount = 0;
+  const waiters = new Set();
+  return {
+    enter() {
+      activeCount++;
+    },
+    leave() {
+      if (activeCount > 0) activeCount--;
+      if (activeCount === 0 && waiters.size > 0) {
+        for (const resolve of [...waiters]) {
+          waiters.delete(resolve);
+          resolve(true);
+        }
+      }
+    },
+    get activeCount() {
+      return activeCount;
+    },
+    waitIfBusy(maxWaitMs = defaultMaxWaitMs) {
+      if (activeCount <= 0 || maxWaitMs <= 0) return Promise.resolve(true);
+      return new Promise(resolve => {
+        let timer = null;
+        const done = idle => {
+          if (timer) clearTimeout(timer);
+          waiters.delete(onIdle);
+          resolve(idle);
+        };
+        const onIdle = () => done(true);
+        waiters.add(onIdle);
+        timer = setTimeout(() => done(false), maxWaitMs);
+      });
+    },
+  };
+}
+
+function toNullableMs(val) {
+  return typeof val === 'number' && Number.isFinite(val) ? Math.max(0, Math.round(val)) : null;
+}
+
+function buildLatencyLogEntry(input = {}) {
+  const result = input.result || {};
+  const timing = {
+    ...(input.preTiming || {}),
+    ...(result.timing || {}),
+    ...(input.timing || {}),
+  };
+  const pickMs = key => toNullableMs(
+    input[key] !== undefined ? input[key] : (result[key] !== undefined ? result[key] : timing[key])
+  );
+  let totalTrueEndOfSpeechMs = pickMs('totalTrueEndOfSpeechMs');
+  if (totalTrueEndOfSpeechMs === null &&
+      typeof timing.firstAudioAtMs === 'number' && Number.isFinite(timing.firstAudioAtMs) &&
+      typeof timing.trueSpeechEndedAtMs === 'number' && Number.isFinite(timing.trueSpeechEndedAtMs)) {
+    totalTrueEndOfSpeechMs = Math.max(0, Math.round(timing.firstAudioAtMs - timing.trueSpeechEndedAtMs));
+  }
+  const replyText = typeof input.reply === 'string' ? input.reply : (typeof result.reply === 'string' ? result.reply : '');
+  const replyLen = typeof input.replyLen === 'number' && Number.isFinite(input.replyLen)
+    ? Math.max(0, Math.round(input.replyLen))
+    : replyText.length;
+  return {
+    ts: typeof input.ts === 'string' && input.ts ? input.ts : new Date().toISOString(),
+    platform: input.platform ?? null,
+    mode: input.mode ?? 'manual',
+    vadSilenceMs: pickMs('vadSilenceMs'),
+    captureToWorkerMs: pickMs('captureToWorkerMs'),
+    whisperMs: pickMs('whisperMs'),
+    notesSyncMs: pickMs('notesSyncMs'),
+    unmuteMs: pickMs('unmuteMs'),
+    codexTtfbMs: pickMs('codexTtfbMs'),
+    totalTrueEndOfSpeechMs,
+    latencyMs: pickMs('latencyMs'),
+    replyLen,
+  };
+}
+
+function appendLatencyLog(entry, {
+  logDirPath = join(homedir(), 'Library/Logs/Nail'),
+  logFilePath,
+  mkdirSyncFn = mkdirSync,
+  appendFileSyncFn = appendFileSync,
+} = {}) {
+  try {
+    const normalized = buildLatencyLogEntry(entry);
+    const targetFile = logFilePath || join(logDirPath, 'latency.jsonl');
+    const targetDir = logFilePath ? dirname(logFilePath) : logDirPath;
+    mkdirSyncFn(targetDir, {recursive: true});
+    appendFileSyncFn(targetFile, `${JSON.stringify(normalized)}\n`);
+    return normalized;
+  } catch {
+    return null;
+  }
+}
+
+function createPresentationSlidePoller({
+  intervalMs = 4000,
+  getState,
+  captureSlide = captureMeetPresentation,
+  recognizeSlide,
+  syncSlideContext,
+  setIntervalFn = setInterval,
+  clearIntervalFn = clearInterval,
+} = {}) {
+  let timer = null;
+  let inFlightAbort = null;
+  let inFlightPromise = null;
+  let lastText = '';
+
+  function shouldKeepTimer() {
+    const st = typeof getState === 'function' ? getState() : {};
+    return st.provider === 'codex'
+      && st.platform === 'meet'
+      && Boolean(st.meetingJoined)
+      && Boolean(st.presentationReadingEnabled)
+      && !st.stopping
+      && Boolean(st.wc)
+      && !st.wc.isDestroyed?.();
+  }
+
+  function canPoll() {
+    if (!shouldKeepTimer()) return false;
+    const st = typeof getState === 'function' ? getState() : {};
+    return !st.voice && !st.turnInterrupted;
+  }
+
+  async function pollOnce() {
+    if (inFlightPromise) return inFlightPromise;
+    if (!canPoll()) return false;
+    const st = getState();
+    const controller = new AbortController();
+    inFlightAbort = controller;
+    const {signal} = controller;
+    inFlightPromise = (async () => {
+      try {
+        const image = await captureSlide(st.wc, signal);
+        if (!image || signal.aborted || !canPoll()) return false;
+        const text = await recognizeSlide(image, signal);
+        if (signal.aborted || !canPoll()) return false;
+        const cleaned = String(text || '').replace(/\s+/g, ' ').trim();
+        if (!cleaned || cleaned === lastText) return false;
+        const synced = await syncSlideContext?.(cleaned, signal);
+        if (synced !== false && !signal.aborted) {
+          lastText = cleaned;
+          return true;
+        }
+        return false;
+      } catch {
+        return false;
+      } finally {
+        if (inFlightAbort === controller) inFlightAbort = null;
+        inFlightPromise = null;
+      }
+    })();
+    return inFlightPromise;
+  }
+
+  function cancelInFlight() {
+    if (inFlightAbort) {
+      inFlightAbort.abort();
+      inFlightAbort = null;
+    }
+  }
+
+  function stop({resetText = false} = {}) {
+    if (timer) {
+      clearIntervalFn(timer);
+      timer = null;
+    }
+    cancelInFlight();
+    if (resetText) lastText = '';
+  }
+
+  function start() {
+    if (!shouldKeepTimer()) return;
+    if (!timer) {
+      timer = setIntervalFn(() => {
+        if (!shouldKeepTimer()) {
+          stop();
+          return;
+        }
+        if (canPoll()) void pollOnce();
+      }, intervalMs);
+    }
+    if (canPoll()) void pollOnce();
+  }
+
+  return {
+    start,
+    stop,
+    cancelInFlight,
+    pollOnce,
+    get isRunning() { return Boolean(timer); },
+    get lastText() { return lastText; },
+  };
+}
+
+async function captureCodexHandsFreeWake(wc, work, {
+  codexSession,
+  checkCodexWake,
+  isStopped = () => false,
+  signal,
+} = {}) {
+  let clip = await wc.executeJavaScript(
+    'typeof window.__nailMedia?.codexRecordWakePcm === "function" ? window.__nailMedia.codexRecordWakePcm(8000, 12000, 450) : window.__nailMedia.record(8000, true, 12000, false)',
+    true
+  );
+  if (clip === undefined) {
+    clip = await wc.executeJavaScript('window.__nailMedia.record(8000, true, 12000, false)', true);
+  }
+  if (!clip || isStopped() || signal?.aborted) {
+    return null;
+  }
+  const isPcmObject = typeof clip === 'object' && typeof clip.pcmBase64 === 'string';
+  if (isPcmObject) {
+    if (!clip.pcmBase64 || clip.pcmBase64.length > 1_500_000) return null;
+    const postCaptureAt = Date.now();
+    codexSession?.prewarmConnection?.(wc);
+    const pcmPath = join(work, 'wake.pcm');
+    await writeFile(pcmPath, Buffer.from(clip.pcmBase64, 'base64'), {mode: 0o600});
+    if (isStopped() || signal?.aborted) return null;
+    const captureToWorkerMs = Math.max(0, Date.now() - postCaptureAt);
+    const workerStartedAt = Date.now();
+    const wakePromise = checkCodexWake(pcmPath, 'wake', {format: 'pcm16k'});
+    return {
+      wakePromise,
+      workerStartedAt,
+      preTimingBase: {
+        vadSilenceMs: Number.isFinite(clip.silenceWaitMs) ? clip.silenceWaitMs : null,
+        captureToWorkerMs,
+        trueSpeechEndedAtMs: Number.isFinite(clip.speechEndedAtMs) ? clip.speechEndedAtMs : null,
+      },
+    };
+  }
+  if (typeof clip !== 'string' || !clip || clip.length > 512_000) {
+    return null;
+  }
+  const postCaptureAt = Date.now();
+  codexSession?.prewarmConnection?.(wc);
+  const webmPath = join(work, 'wake.webm');
+  await writeFile(webmPath, Buffer.from(clip, 'base64'), {mode: 0o600});
+  if (isStopped() || signal?.aborted) return null;
+  const captureToWorkerMs = Math.max(0, Date.now() - postCaptureAt);
+  const workerStartedAt = Date.now();
+  const wakePromise = checkCodexWake(webmPath, 'wake');
+  return {
+    wakePromise,
+    workerStartedAt,
+    preTimingBase: {
+      vadSilenceMs: null,
+      captureToWorkerMs,
+      trueSpeechEndedAtMs: null,
+    },
+  };
+}
+
+async function executeCodexHandsFreeTurn({
+  wc,
+  read,
+  click,
+  codexSession,
+  checkCodexWake,
+  emit = () => {},
+  logVoiceError = async () => {},
+  onActiveWakeAbort = () => {},
+  isStopping = () => false,
+  isTurnInterrupted = () => false,
+  setTurnInterrupted = () => {},
+  isTurnRequested = () => false,
+  platform = 'meet',
+  presentationReadingEnabled = false,
+  runCodexPresentationTurn,
+  runCodexTextTurn,
+  runCodexLiveTurn,
+} = {}) {
+  setTurnInterrupted(false);
+  if (!isTurnRequested() && !isStopping()) emit('voice-standby');
+  const work = await mkdtemp(join(tmpdir(), 'nail-wake-'));
+  const wakeAbort = new AbortController();
+  onActiveWakeAbort(wakeAbort);
+  const isStopped = () => isStopping() || isTurnInterrupted() || isTurnRequested() || wakeAbort.signal.aborted;
+  let wake = null;
+  let preTiming = null;
+  try {
+    const captured = await captureCodexHandsFreeWake(wc, work, {
+      codexSession,
+      checkCodexWake,
+      isStopped,
+      signal: wakeAbort.signal,
+    });
+    if (!captured) {
+      await rm(work, {recursive: true, force: true}).catch(() => {});
+      return;
+    }
+    const {wakePromise, workerStartedAt, preTimingBase} = captured;
+    wakePromise
+      .catch(error => { if (wakeAbort.signal.aborted) return logVoiceError(error); })
+      .finally(() => { rm(work, {recursive: true, force: true}).catch(() => {}); });
+    wake = await new Promise((resolve, reject) => {
+      if (isStopped()) {
+        resolve(null);
+        return;
+      }
+      const onAbort = () => resolve(null);
+      wakeAbort.signal.addEventListener('abort', onAbort, {once: true});
+      wakePromise.then(
+        res => { wakeAbort.signal.removeEventListener('abort', onAbort); resolve(res); },
+        err => { wakeAbort.signal.removeEventListener('abort', onAbort); reject(err); },
+      );
+    });
+    if (wake) {
+      const whisperMs = Number.isFinite(wake.whisperMs)
+        ? wake.whisperMs
+        : Math.max(0, Date.now() - workerStartedAt);
+      preTiming = {
+        ...preTimingBase,
+        whisperMs,
+      };
+    }
+  } catch (error) {
+    await logVoiceError(error);
+    await rm(work, {recursive: true, force: true}).catch(() => {});
+    return;
+  } finally {
+    onActiveWakeAbort(null, wakeAbort);
+  }
+
+  if (!wake?.triggered || isStopping() || isTurnInterrupted() || isTurnRequested()) return;
+  emit(`voice-wake ${JSON.stringify({heard: wake.prompt || wake.raw || 'Nail'})}`);
+  if (wake.has_query && wake.prompt) {
+    if (shouldReadPresentation(platform, presentationReadingEnabled, wake.prompt)) {
+      await runCodexPresentationTurn(wc, read, click, wake.prompt, {mode: 'presentation', preTiming});
+    } else {
+      await runCodexTextTurn(wc, read, click, wake.prompt, {mode: 'hands-free', preTiming});
+    }
+  } else {
+    await runCodexLiveTurn(wc, read, click, {mode: 'hands-free', preTiming});
+  }
+}
+
+async function executeCodexTurnWithFollowUp({
+  wc,
+  read,
+  click,
+  executeTurn,
+  codexSession,
+  unmuteAndVerifyMicFn,
+  restoreMeetMuteFn,
+  meetingNotes,
+  emit = () => {},
+  appendTeamsLog = () => {},
+  appendLatencyLogFn = appendLatencyLog,
+  logVoiceError = async () => {},
+  cancelSignal,
+  onActiveTurnAbort = () => {},
+  onTurnStart = () => {},
+  onTurnEnd = () => {},
+  isStopping = () => false,
+  isTurnInterrupted = () => false,
+  setTurnInterrupted = () => {},
+  isTurnRequested = () => false,
+  platform = 'meet',
+  provider = 'codex',
+  mode = 'manual',
+  preTiming = null,
+} = {}) {
+  const micState = {restoreMute: false};
+  setTurnInterrupted(false);
+  onTurnStart();
+  const turnAbort = new AbortController();
+  const onStop = () => turnAbort.abort(cancelSignal?.reason ?? new Error('voice-interrupted'));
+  if (cancelSignal?.aborted) onStop();
+  else cancelSignal?.addEventListener('abort', onStop, {once: true});
+  onActiveTurnAbort(turnAbort);
+
+  let muteRestored = false;
+  const cleanupMicAndSenders = async () => {
+    if (muteRestored) return;
+    muteRestored = true;
+    await wc?.executeJavaScript?.('window.__nailMedia?.restoreTeamsSenders?.()', true)?.catch?.(() => {});
+    if (restoreMeetMuteFn) {
+      await restoreMeetMuteFn(wc, read, click, micState.restoreMute);
+    }
+  };
+
+  const recordCompletedTurn = async (turnResult, turnMode, turnPreTiming = null) => {
+    if (platform === 'teams') {
+      const outDiag = await wc?.executeJavaScript?.('window.__nailMedia?.micOutDiag?.()', true)?.catch?.(() => null);
+      appendTeamsLog(
+        `TURN_END provider=${provider} mode=${turnMode} latencyMs=${turnResult.latencyMs} replyLen=${(turnResult.reply || '').length} codex=${JSON.stringify(turnResult.diag ?? null)} out=${JSON.stringify(outDiag)}`
+      );
+    }
+    appendLatencyLogFn({
+      platform,
+      mode: turnMode,
+      result: turnResult,
+      preTiming: turnPreTiming,
+    });
+    meetingNotes?.addExchange?.({
+      heard: turnResult.heard,
+      reply: turnResult.reply,
+      heardAtMs: turnResult.heardAtMs,
+      replyAtMs: turnResult.replyAtMs,
+    });
+    emit(`voice-result ${JSON.stringify({
+      heard: turnResult.heard,
+      reply: turnResult.reply,
+      heardAtMs: turnResult.heardAtMs,
+      replyAtMs: turnResult.replyAtMs,
+      latencyMs: turnResult.latencyMs,
+    })}`);
+  };
+
+  try {
+    const unmuteMeet = () => unmuteAndVerifyMicFn
+      ? unmuteAndVerifyMicFn(wc, read, click, micState, turnAbort.signal)
+      : Promise.resolve(true);
+    const result = await executeTurn({
+      unmuteMeet,
+      signal: turnAbort.signal,
+      progress: emit,
+      keepFollowUpMic: true,
+    });
+    if (isStopping() || isTurnInterrupted() || turnAbort.signal.aborted || result?.aborted) return;
+    if (result?.noAudio) {
+      const diag = await wc?.executeJavaScript?.('window.__nailDiagnostics ?? null', true)?.catch?.(() => null);
+      emit(`voice-no-audio ${JSON.stringify(diag ?? {})}`);
+      return;
+    }
+    await recordCompletedTurn(result, mode, preTiming);
+    try {
+      while (!isStopping() && !isTurnInterrupted() && !isTurnRequested() && !turnAbort.signal.aborted) {
+        emit('voice-followup');
+        const followUpResult = await codexSession.runLiveTurn(wc, {
+          unmuteMeet,
+          signal: turnAbort.signal,
+          progress: emit,
+          maxWaitMs: 7000,
+          silenceMs: 350,
+          skipUnmute: true,
+          keepFollowUpMic: true,
+        });
+        if (isStopping() || isTurnInterrupted() || isTurnRequested() || turnAbort.signal.aborted ||
+            followUpResult?.aborted || followUpResult?.noAudio) {
+          break;
+        }
+        await recordCompletedTurn(followUpResult, 'follow-up');
+      }
+    } finally {
+      await cleanupMicAndSenders();
+    }
+    if (!isStopping() && !isTurnInterrupted() && !isTurnRequested() && !turnAbort.signal.aborted) {
+      emit('voice-standby');
+    }
+  } catch (error) {
+    await cleanupMicAndSenders();
+    if (error?.message === 'voice-interrupted' || error?.name === 'AbortError' || isStopping() || isTurnInterrupted()) return;
+    await logVoiceError(error);
+    emit(error.message === 'voice-no-mic' || /^voice-codex-(quota|login|missing|timeout|error|connection|no-transcript)$/.test(error.message)
+      ? error.message : 'voice-failed');
+  } finally {
+    cancelSignal?.removeEventListener('abort', onStop);
+    onActiveTurnAbort(null, turnAbort);
+    await cleanupMicAndSenders();
+    onTurnEnd();
+  }
+}
+
 if (process.versions.electron) {
   const [target, profile, provider, pipeline] = process.argv.slice(2);
   const login = target === '--login';
@@ -919,6 +1400,7 @@ if (process.versions.electron) {
   let codexWakeFailed = false;
   let codexWakeUnavailableEmitted = false;
   let activeCodexWakeAbort = null;
+  const codexWakeGate = createWakePriorityGate({defaultMaxWaitMs: 1500});
   function stopCodexWakeDaemon() {
     const worker = codexWakeWorker;
     codexWakeWorker = null;
@@ -931,7 +1413,7 @@ if (process.versions.electron) {
       return Promise.reject(new Error('codex wake daemon unavailable'));
     }
     if (codexWakeReady) return codexWakeReady;
-    const configuredModel = runtimeConfig.whisperModel || 'small';
+    const configuredModel = resolveCodexWakeWhisperModel(runtimeConfig);
     const spawnWakeWorker = modelName => {
       if (stopping) {
         return Promise.reject(new Error('codex wake daemon unavailable'));
@@ -989,13 +1471,15 @@ if (process.versions.electron) {
         pending.delete(parsed.id);
         waiter.resolve(parsed);
       });
-      codexWakeRequest = (audioPath, mode) => {
+      codexWakeRequest = (audioPath, mode, opts = {}) => {
         if (exited || !worker.stdin?.writable) return Promise.reject(exited || new Error('codex wake daemon not ready'));
         const id = ++codexWakeSeq;
+        const payload = {id, audio: audioPath, mode};
+        if (opts?.format) payload.format = opts.format;
         return new Promise((resolve, reject) => {
           pending.set(id, {resolve, reject});
           try {
-            worker.stdin.write(`${JSON.stringify({id, audio: audioPath, mode})}\n`);
+            worker.stdin.write(`${JSON.stringify(payload)}\n`);
           } catch (err) {
             pending.delete(id);
             reject(err);
@@ -1027,17 +1511,20 @@ if (process.versions.electron) {
     codexWakeReady = readyPromise;
     return readyPromise;
   }
-  function checkCodexWake(audioPath, mode = 'wake') {
+  function checkCodexWake(audioPath, mode = 'wake', opts = {}) {
+    codexWakeGate.enter();
     const runCheck = async () => {
       await startCodexWakeDaemon();
       if (!codexWakeRequest) {
         throw new Error('codex wake daemon not ready');
       }
-      const result = await codexWakeRequest(audioPath, mode);
+      const result = await codexWakeRequest(audioPath, mode, opts);
       if (result.error) throw new Error(result.error);
       return result;
     };
-    const next = codexWakeQueue.then(runCheck, runCheck);
+    const next = codexWakeQueue.then(runCheck, runCheck).finally(() => {
+      codexWakeGate.leave();
+    });
     codexWakeQueue = next.catch(() => {});
     return next;
   }
@@ -1076,6 +1563,7 @@ if (process.versions.electron) {
       }
     }
     emit(`voice-notulen-codex ${JSON.stringify(lines)}`);
+    codexSession?.syncNotesToLiveSession?.(undefined, {background: true})?.catch?.(() => {});
   };
   function syncCodexNotes() {
     if (provider !== 'codex' || !meetingJoined || listeningMode !== 'notulen' || stopping || notesTask || notesFailed) return;
@@ -1105,7 +1593,7 @@ if (process.versions.electron) {
     const worker = spawn('/opt/homebrew/bin/uv', [
       'run', '--offline', '--script', join(__dirname, 'agy-voice.py'),
       '--transcribe-daemon', '--whisper-model', runtimeConfig.whisperModel || 'small',
-      '--cpu-threads', '2',
+      '--cpu-threads', '2', '--low-priority',
       '--speaker-models', models, '--first-speaker', String(nextNotesSpeaker),
     ], {env, stdio: ['pipe', 'pipe', 'pipe'], detached: process.platform !== 'win32'});
     notesWorker = worker;
@@ -1156,6 +1644,7 @@ if (process.versions.electron) {
         }
         if (saveError) throw saveError;
         await ready;
+        await codexWakeGate.waitIfBusy(1500);
         if (stopping) {
           await rm(path, {force: true}).catch(() => {});
           return;
@@ -1223,6 +1712,22 @@ if (process.versions.electron) {
   let activeWin = null;
   let activeWc = null;
   let activeTurnAbort = null;
+  const slidePoller = createPresentationSlidePoller({
+    intervalMs: 4000,
+    getState: () => ({
+      provider,
+      platform,
+      meetingJoined,
+      presentationReadingEnabled,
+      voice: Boolean(activeTurnAbort || codexSession?.turnState),
+      stopping,
+      turnInterrupted,
+      wc: activeWc,
+    }),
+    captureSlide: captureMeetPresentation,
+    recognizeSlide: (img, sig) => presentationOCR.recognize(img, sig),
+    syncSlideContext: (txt, sig) => codexSession?.syncPresentationContext?.(txt, sig),
+  });
 
   async function presentationAnswer(wc, question, signal) {
     let image;
@@ -1283,6 +1788,7 @@ if (process.versions.electron) {
     } else if (line === 'voice-turn') {
       turnRequested = true;
       turnInterrupted = false;
+      slidePoller.cancelInFlight();
       if (provider === 'codex') {
         activeCodexWakeAbort?.abort();
         activeWc?.executeJavaScript('window.__nailAbortRecord?.()').catch(() => {});
@@ -1309,17 +1815,23 @@ if (process.versions.electron) {
       turnInterrupted = true;
       followUpUntil = 0;
       lastSpokenReply = {text: '', at: 0};
+      slidePoller.cancelInFlight();
       activeCodexWakeAbort?.abort();
       autoVoiceAbort?.abort(new Error('voice-interrupted'));
       activeTurnAbort?.abort(new Error('voice-interrupted'));
       activePresentationAbort?.abort();
       if (provider === 'antigravity' && agyClient?.isRunning) agyClient.recycle();
       codexSession?.interrupt(activeWc);
-      activeWc?.executeJavaScript('window.__nailMedia?.stopPlay?.(); window.__nailAbortRecord?.()').catch(() => {});
+      activeWc?.executeJavaScript('window.__nailMedia?.stopPlay?.(); window.__nailAbortRecord?.(); window.__nailMedia?.restoreTeamsSenders?.()').catch(() => {});
       emit('voice-interrupted');
     } else if (line === 'presentation-reading on' || line === 'presentation-reading off') {
       presentationReadingEnabled = line.endsWith(' on');
-      if (!presentationReadingEnabled) activePresentationAbort?.abort();
+      if (!presentationReadingEnabled) {
+        activePresentationAbort?.abort();
+        slidePoller.stop({resetText: true});
+      } else {
+        slidePoller.start();
+      }
     } else if (line === 'mode standby' || line === 'mode notulen') {
       listeningMode = line === 'mode notulen' ? 'notulen' : 'standby';
       if (listeningMode === 'notulen') notesFailed = false;
@@ -1341,13 +1853,14 @@ if (process.versions.electron) {
   commands.on('close', () => {
     stopping = true;
     closeAvatar();
+    slidePoller.stop({resetText: true});
     activePresentationAbort?.abort();
     followUpUntil = 0;
     activeCodexWakeAbort?.abort();
     cancelVoice.abort(new Error('voice-interrupted'));
     activeTurnAbort?.abort(new Error('voice-interrupted'));
     codexSession?.dispose().catch(() => {});
-    activeWc?.executeJavaScript('window.__nailMedia?.stopPlay?.(); window.__nailAbortRecord?.()').catch(() => {});
+    activeWc?.executeJavaScript('window.__nailMedia?.stopPlay?.(); window.__nailAbortRecord?.(); window.__nailMedia?.restoreTeamsSenders?.()').catch(() => {});
     stopCodexWakeDaemon();
     stopNotesWorker();
     agyClient?.recycle();
@@ -1571,7 +2084,7 @@ if (process.versions.electron) {
             state.restoreMute = true;
           } catch {}
         }
-        await delay(120);
+        await delay(40);
       }
       if (stopping || turnInterrupted || signal?.aborted) return false;
       if (after?.unmute) {
@@ -1590,12 +2103,11 @@ if (process.versions.electron) {
     if (isSending) {
       if (platform === 'teams') {
         if (state.restoreMute) {
-          await delay(250);
+          await delay(100);
           if (stopping || turnInterrupted || signal?.aborted) return false;
         }
-        const outDiag = await wc.executeJavaScript('window.__nailMedia?.micOutDiag?.()', true).catch(() => null);
         appendTeamsLog(
-          `UNMUTE_OK before=${JSON.stringify({u: before.unmute?.name ?? null, m: before.mute?.name ?? null})} after=${JSON.stringify({u: after?.unmute?.name ?? null, m: after?.mute?.name ?? null})} restore=${state.restoreMute} diag=${JSON.stringify(outDiag)}`
+          `UNMUTE_OK before=${JSON.stringify({u: before.unmute?.name ?? null, m: before.mute?.name ?? null})} after=${JSON.stringify({u: after?.unmute?.name ?? null, m: after?.mute?.name ?? null})} restore=${state.restoreMute}`
         );
       }
       return true;
@@ -1623,68 +2135,54 @@ if (process.versions.electron) {
     } catch {}
   }
 
-  async function runCodexTurn(wc, read, click, executeTurn) {
-    const micState = {restoreMute: false};
-    turnInterrupted = false;
-    const turnAbort = new AbortController();
-    const onStop = () => turnAbort.abort(cancelVoice.signal.reason ?? new Error('voice-interrupted'));
-    if (cancelVoice.signal.aborted) onStop();
-    else cancelVoice.signal.addEventListener('abort', onStop, {once: true});
-    activeTurnAbort = turnAbort;
-    try {
-      const result = await executeTurn({
-        unmuteMeet: () => unmuteAndVerifyMic(wc, read, click, micState, turnAbort.signal),
-        signal: turnAbort.signal,
-        progress: emit,
-      });
-      if (stopping || turnInterrupted || result?.aborted) return;
-      if (result?.noAudio) {
-        const diag = await wc.executeJavaScript('window.__nailDiagnostics ?? null', true).catch(() => null);
-        emit(`voice-no-audio ${JSON.stringify(diag ?? {})}`);
-        return;
-      }
-      if (platform === 'teams') {
-        const outDiag = await wc.executeJavaScript('window.__nailMedia?.micOutDiag?.()', true).catch(() => null);
-        appendTeamsLog(
-          `TURN_END provider=${provider} latencyMs=${result.latencyMs} replyLen=${(result.reply || '').length} codex=${JSON.stringify(result.diag ?? null)} out=${JSON.stringify(outDiag)}`
-        );
-      }
-      meetingNotes.addExchange({
-        heard: result.heard,
-        reply: result.reply,
-        heardAtMs: result.heardAtMs,
-        replyAtMs: result.replyAtMs,
-      });
-      emit(`voice-result ${JSON.stringify({
-        heard: result.heard,
-        reply: result.reply,
-        heardAtMs: result.heardAtMs,
-        replyAtMs: result.replyAtMs,
-        latencyMs: result.latencyMs,
-      })}`);
-      emit('voice-standby');
-      await delay(250);
-    } catch (error) {
-      if (error?.message === 'voice-interrupted' || error?.name === 'AbortError' || stopping || turnInterrupted) return;
-      await logVoiceError(error);
-      emit(error.message === 'voice-no-mic' || /^voice-codex-(quota|login|missing|timeout|error|connection|no-transcript)$/.test(error.message)
-        ? error.message : 'voice-failed');
-    } finally {
-      cancelVoice.signal.removeEventListener('abort', onStop);
-      if (activeTurnAbort === turnAbort) activeTurnAbort = null;
-      await restoreMeetMute(wc, read, click, micState.restoreMute);
-    }
+  async function runCodexTurn(wc, read, click, executeTurn, {mode = 'manual', preTiming = null} = {}) {
+    return executeCodexTurnWithFollowUp({
+      wc,
+      read,
+      click,
+      executeTurn,
+      codexSession,
+      unmuteAndVerifyMicFn: unmuteAndVerifyMic,
+      restoreMeetMuteFn: restoreMeetMute,
+      meetingNotes,
+      emit,
+      appendTeamsLog,
+      appendLatencyLogFn: appendLatencyLog,
+      logVoiceError,
+      cancelSignal: cancelVoice.signal,
+      onActiveTurnAbort: (nextAbort, prevAbort) => {
+        if (nextAbort) activeTurnAbort = nextAbort;
+        else if (activeTurnAbort === prevAbort) activeTurnAbort = null;
+      },
+      onTurnStart: () => {
+        slidePoller.cancelInFlight();
+      },
+      onTurnEnd: () => {
+        slidePoller.start();
+      },
+      isStopping: () => stopping,
+      isTurnInterrupted: () => turnInterrupted,
+      setTurnInterrupted: val => { turnInterrupted = val; },
+      isTurnRequested: () => turnRequested,
+      platform,
+      provider,
+      mode,
+      preTiming,
+    });
   }
 
-  async function runCodexLiveTurn(wc, read, click) {
-    return runCodexTurn(wc, read, click, opts => codexSession.runLiveTurn(wc, opts));
+  async function runCodexLiveTurn(wc, read, click, turnOpts = {}) {
+    const {mode = 'manual', preTiming = null} = turnOpts;
+    return runCodexTurn(wc, read, click, opts => codexSession.runLiveTurn(wc, opts), {mode, preTiming});
   }
 
-  async function runCodexTextTurn(wc, read, click, text) {
-    return runCodexTurn(wc, read, click, opts => codexSession.runTextTurn(wc, {text, ...opts}));
+  async function runCodexTextTurn(wc, read, click, text, turnOpts = {}) {
+    const {mode = 'hands-free', preTiming = null} = turnOpts;
+    return runCodexTurn(wc, read, click, opts => codexSession.runTextTurn(wc, {text, preTiming, ...opts}), {mode, preTiming});
   }
 
-  async function runCodexPresentationTurn(wc, read, click, question) {
+  async function runCodexPresentationTurn(wc, read, click, question, turnOpts = {}) {
+    const {mode = 'presentation', preTiming = null} = turnOpts;
     return runCodexTurn(wc, read, click, async opts => {
       const controller = new AbortController();
       const onAbort = () => controller.abort();
@@ -1699,143 +2197,45 @@ if (process.versions.electron) {
           ...opts,
           signal: controller.signal,
           displayText: question,
+          preTiming,
           text: `Bacakan jawaban berikut persis seperti tertulis, tanpa menambah penjelasan: ${answer}`,
         });
       } finally {
         opts.signal.removeEventListener('abort', onAbort);
         if (activePresentationAbort === controller) activePresentationAbort = null;
       }
-    });
+    }, {mode, preTiming});
   }
 
   async function runCodexHandsFreeTurn(wc, read, click) {
-    if (!turnRequested && !stopping) emit('voice-standby');
-    const work = await mkdtemp(join(tmpdir(), 'nail-wake-'));
-    const input = join(work, 'wake.webm');
-    const wakeAbort = new AbortController();
-    activeCodexWakeAbort = wakeAbort;
-    let wake = null;
-    try {
-      const clip = await recordCodexQuestion(wc, work, true);
-      if (typeof clip !== 'string' || !clip || clip.length > 512_000 ||
-          stopping || turnInterrupted || turnRequested || wakeAbort.signal.aborted) {
-        await rm(work, {recursive: true, force: true}).catch(() => {});
-        return;
-      }
-      await writeFile(input, Buffer.from(clip, 'base64'), {mode: 0o600});
-      if (stopping || turnInterrupted || turnRequested || wakeAbort.signal.aborted) {
-        await rm(work, {recursive: true, force: true}).catch(() => {});
-        return;
-      }
-      const wakePromise = checkCodexWake(input);
-      wakePromise
-        .catch(error => { if (wakeAbort.signal.aborted) return logVoiceError(error); })
-        .finally(() => { rm(work, {recursive: true, force: true}).catch(() => {}); });
-      wake = await new Promise((resolve, reject) => {
-        if (wakeAbort.signal.aborted || stopping || turnInterrupted || turnRequested) {
-          resolve(null);
-          return;
-        }
-        const onAbort = () => resolve(null);
-        wakeAbort.signal.addEventListener('abort', onAbort, {once: true});
-        wakePromise.then(
-          res => { wakeAbort.signal.removeEventListener('abort', onAbort); resolve(res); },
-          err => { wakeAbort.signal.removeEventListener('abort', onAbort); reject(err); },
-        );
-      });
-    } catch (error) {
-      await logVoiceError(error);
-      await rm(work, {recursive: true, force: true}).catch(() => {});
-      return;
-    } finally {
-      if (activeCodexWakeAbort === wakeAbort) activeCodexWakeAbort = null;
-    }
-
-    if (!wake?.triggered || stopping || turnInterrupted || turnRequested) return;
-    emit(`voice-wake ${JSON.stringify({heard: wake.prompt || wake.raw || 'Nail'})}`);
-    if (wake.has_query && wake.prompt) {
-      if (shouldReadPresentation(platform, presentationReadingEnabled, wake.prompt)) {
-        await runCodexPresentationTurn(wc, read, click, wake.prompt);
-      } else {
-        await runCodexTextTurn(wc, read, click, wake.prompt);
-      }
-    } else {
-      await runCodexLiveTurn(wc, read, click);
-    }
-  }
-
-  function transcriptQuestion(transcript) {
-    return (transcript.entries || []).map(entry => entry.text).filter(Boolean).join(' ').trim();
-  }
-
-  async function recordCodexQuestion(wc, work, handsFree = false) {
-    const previewPath = join(work, 'preview.webm');
-    const interrupted = () => stopping || turnInterrupted || turnRequested;
-    let recording = true;
-    let pending = null;
-    let lastText = '';
-    const timer = setInterval(() => {
-      if (pending || interrupted()) return;
-      pending = (async () => {
-        const clip = await wc.executeJavaScript('__nailMedia.recordingPreview()', true);
-        if (!recording || interrupted() || typeof clip !== 'string' || !clip || clip.length > 512_000) return;
-        await writeFile(previewPath, Buffer.from(clip, 'base64'), {mode: 0o600});
-        if (!recording || interrupted()) return;
-        const transcript = await checkCodexWake(previewPath, handsFree ? 'wake-preview' : 'preview');
-        const heard = handsFree ? transcript.prompt : transcriptQuestion(transcript);
-        if (recording && !interrupted() && heard && heard !== lastText) {
-          lastText = heard;
-          emit(`voice-preview ${JSON.stringify({heard})}`);
-        }
-      })().catch(() => {}).finally(() => { pending = null; });
-    }, 250);
-    try {
-      const capture = handsFree
-        ? '__nailMedia.record(8000, true, 12000, true)'
-        : '__nailMedia.record(12000, false, 8000, true)';
-      return await wc.executeJavaScript(capture, true);
-    } finally {
-      recording = false;
-      clearInterval(timer);
-      await pending;
-    }
-  }
-
-  async function runCodexManualTurn(wc, read, click) {
-    const work = await mkdtemp(join(tmpdir(), 'nail-manual-'));
-    const input = join(work, 'question.webm');
-    try {
-      emit('voice-recording');
-      const clip = await recordCodexQuestion(wc, work);
-      if (stopping || turnInterrupted || turnRequested) return;
-      if (!clip) { emit('voice-no-audio'); return; }
-      if (typeof clip !== 'string' || clip.length > 512_000) throw new Error('Invalid audio');
-      await writeFile(input, Buffer.from(clip, 'base64'), {mode: 0o600});
-      emit('voice-processing');
-      const transcript = await checkCodexWake(input, 'transcript');
-      if (stopping || turnInterrupted || turnRequested) return;
-      const question = transcriptQuestion(transcript);
-      if (!question) { emit('voice-no-audio'); return; }
-      emit(`voice-preview ${JSON.stringify({heard: question})}`);
-      if (shouldReadPresentation(platform, presentationReadingEnabled, question)) {
-        await runCodexPresentationTurn(wc, read, click, question);
-      } else {
-        await runCodexTextTurn(wc, read, click, question);
-      }
-    } finally {
-      await rm(work, {recursive: true, force: true});
-    }
+    return executeCodexHandsFreeTurn({
+      wc,
+      read,
+      click,
+      codexSession,
+      checkCodexWake,
+      emit,
+      logVoiceError,
+      onActiveWakeAbort: (nextAbort, prevAbort) => {
+        if (nextAbort) activeCodexWakeAbort = nextAbort;
+        else if (activeCodexWakeAbort === prevAbort) activeCodexWakeAbort = null;
+      },
+      isStopping: () => stopping,
+      isTurnInterrupted: () => turnInterrupted,
+      setTurnInterrupted: val => { turnInterrupted = val; },
+      isTurnRequested: () => turnRequested,
+      platform,
+      presentationReadingEnabled,
+      runCodexPresentationTurn,
+      runCodexTextTurn,
+      runCodexLiveTurn,
+    });
   }
 
   async function voiceTurn(wc, read, click, auto = false, isFollowUp = false) {
     if (provider === 'codex' && codexSession) {
       try {
         if (!auto) {
-          if (platform === 'meet' && presentationReadingEnabled) {
-            const canTranscribe = await startCodexWakeDaemon().then(() => true, () => false);
-            if (stopping || turnInterrupted || turnRequested) return;
-            if (canTranscribe && presentationReadingEnabled) return await runCodexManualTurn(wc, read, click);
-          }
           return await runCodexLiveTurn(wc, read, click);
         }
         if (codexHandsFree && !codexWakeFailed) return await runCodexHandsFreeTurn(wc, read, click);
@@ -2209,7 +2609,7 @@ if (process.versions.electron) {
       : wc.executeJavaScript(`(${inspectMeet})()`);
     agyClient?.ensureReady().catch(() => {});
     codexSession?.warmup().catch(() => {});
-    if (codexHandsFree || (codexSession && platform === 'meet' && presentationReadingEnabled)) {
+    if (codexHandsFree) {
       startCodexWakeDaemon().catch(() => {});
     }
     const click = async item => {
@@ -2370,7 +2770,10 @@ if (process.versions.electron) {
         const state = await read();
         if (avatarUnmuted && !state.mute) emitAvatarAudio(0, false);
         avatarUnmuted = Boolean(state.mute);
-        if (joined && !state.inCall) return 'left';
+        if (joined && !state.inCall) {
+          slidePoller.stop({resetText: true});
+          return 'left';
+        }
         if (state.rejected) return 'rejected';
         if (!submitted && state.skip && !skipped) skipped = await click(state.skip);
         else if (!submitted && state.dismiss && !dismissed) dismissed = await click(state.dismiss);
@@ -2386,6 +2789,7 @@ if (process.versions.electron) {
           joined = true;
           meetingJoined = true;
           syncCodexNotes();
+          slidePoller.start();
           emit('joined');
           codexSession?.ensureConnected(wc).catch(() => {});
         } else if (joined && provider && !voice && (turnRequested || provider !== 'codex' || (codexHandsFree && !codexWakeFailed))) {
@@ -2547,6 +2951,7 @@ if (process.versions.electron) {
   }
 
   async function gracefulLeaveCall(wc, read, click, voicePromise) {
+    slidePoller.stop({resetText: true});
     try {
       const state = await Promise.race([read(), delay(1500).then(() => null)]);
       if (state?.leave) {
@@ -2563,6 +2968,7 @@ if (process.versions.electron) {
     if (finalized) return;
     finalized = true;
     closeAvatar();
+    slidePoller.stop({resetText: true});
     clearTimeout(startup);
     if (shutdownFailsafe) {
       clearTimeout(shutdownFailsafe);
@@ -2603,6 +3009,7 @@ if (process.versions.electron) {
   }).then(async result => {
     clearTimeout(startup);
     meetingJoined = false;
+    slidePoller.stop({resetText: true});
     await Promise.race([notesTask, delay(1500)]).catch(() => {});
     await Promise.race([codexSession?.dispose(), delay(800)]).catch(() => {});
     if (result) {
@@ -2613,6 +3020,7 @@ if (process.versions.electron) {
   }).catch(async err => {
     clearTimeout(startup);
     meetingJoined = false;
+    slidePoller.stop({resetText: true});
     await Promise.race([notesTask, delay(1000)]).catch(() => {});
     if (platform === 'teams') appendTeamsLog(`UNHANDLED_ERR ${err?.stack || err?.message || err}`);
     if (activeWc && !activeWc.isDestroyed?.()) {
@@ -2623,4 +3031,28 @@ if (process.versions.electron) {
   });
 }
 
-module.exports = { attributeNotes, createMeetingNotesMemory, createAgyDaemonClient, detectPlatform, isAllowedTeamsHost, buildTeamsLightLaunchURL, inspectMeet, inspectTeams, fillTeamsName, findMeetPresentation, captureMeetPresentation, createPresentationOCRBridge, presentationRequestKind, shouldReadPresentation, meetAvatarCameraAction };
+module.exports = {
+  attributeNotes,
+  createMeetingNotesMemory,
+  createAgyDaemonClient,
+  detectPlatform,
+  isAllowedTeamsHost,
+  buildTeamsLightLaunchURL,
+  inspectMeet,
+  inspectTeams,
+  fillTeamsName,
+  findMeetPresentation,
+  captureMeetPresentation,
+  createPresentationOCRBridge,
+  presentationRequestKind,
+  shouldReadPresentation,
+  meetAvatarCameraAction,
+  resolveCodexWakeWhisperModel,
+  createWakePriorityGate,
+  buildLatencyLogEntry,
+  appendLatencyLog,
+  createPresentationSlidePoller,
+  captureCodexHandsFreeWake,
+  executeCodexHandsFreeTurn,
+  executeCodexTurnWithFollowUp,
+};

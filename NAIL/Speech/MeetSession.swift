@@ -673,7 +673,7 @@ final class MeetSession {
             voiceBusy = false
             isSpeaking = false
             visualState = .followUp
-            status = "Jendela lanjutan 3 detik (tanpa perlu 'Nail')…"
+            status = "Jendela lanjutan aktif (langsung bicara tanpa 'Nail')…"
         case "voice-recording":
             voiceBusy = true
             visualState = .active

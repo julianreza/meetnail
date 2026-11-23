@@ -1,6 +1,13 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const {findMeetPresentation, captureMeetPresentation, createPresentationOCRBridge, presentationRequestKind, shouldReadPresentation} = require('../NAIL/Resources/meet.cjs');
+const {
+  findMeetPresentation,
+  captureMeetPresentation,
+  createPresentationOCRBridge,
+  createPresentationSlidePoller,
+  presentationRequestKind,
+  shouldReadPresentation,
+} = require('../NAIL/Resources/meet.cjs');
 const {CodexLiveSession, visionMcpOverrides} = require('../NAIL/Resources/codex-voice.cjs');
 
 function makeVideo({marker = true, tile = 'presenter-1', x = 16, y = 118, width = 910, height = 569, ready = 4} = {}) {
@@ -144,4 +151,62 @@ test('vision configuration disables every configured MCP server', () => {
     '-c', 'mcp_servers.local-agent.enabled=false',
   ]);
   assert.throws(() => visionMcpOverrides({mcp_servers: {'name.with.dots': {}}}), /presentation-vision-tools-enabled/);
+});
+
+test('background slide OCR poller syncs changed slide text, skips during voice turn, and cancels cleanly', async () => {
+  const state = {
+    provider: 'codex',
+    platform: 'meet',
+    meetingJoined: true,
+    presentationReadingEnabled: true,
+    voice: false,
+    stopping: false,
+    turnInterrupted: false,
+    wc: {isDestroyed: () => false},
+  };
+  const syncedTexts = [];
+  let slideText = '  Judul Slide 1:   Target Q4  ';
+  let captureCount = 0;
+
+  const poller = createPresentationSlidePoller({
+    intervalMs: 4000,
+    getState: () => state,
+    captureSlide: async (_wc, signal) => {
+      if (signal?.aborted) return null;
+      captureCount++;
+      return Buffer.from('slide-png');
+    },
+    recognizeSlide: async (_img, signal) => {
+      if (signal?.aborted) throw new DOMException('Interrupted', 'AbortError');
+      return slideText;
+    },
+    syncSlideContext: async (text, signal) => {
+      if (signal?.aborted) return false;
+      syncedTexts.push(text);
+      return true;
+    },
+  });
+
+  assert.equal(await poller.pollOnce(), true);
+  assert.deepEqual(syncedTexts, ['Judul Slide 1: Target Q4']);
+  assert.equal(captureCount, 1);
+
+  // Unchanged slide text is deduped and not re-synced
+  assert.equal(await poller.pollOnce(), false);
+  assert.equal(syncedTexts.length, 1);
+  assert.equal(captureCount, 2);
+
+  // Active voice turn skips polling completely
+  state.voice = true;
+  slideText = 'Slide 2: Roadmap';
+  assert.equal(await poller.pollOnce(), false);
+  assert.equal(captureCount, 2);
+
+  // Resuming standby syncs new slide text
+  state.voice = false;
+  assert.equal(await poller.pollOnce(), true);
+  assert.deepEqual(syncedTexts, ['Judul Slide 1: Target Q4', 'Slide 2: Roadmap']);
+
+  poller.stop({resetText: true});
+  assert.equal(poller.lastText, '');
 });
