@@ -1055,3 +1055,79 @@ test('meet-media.cjs codexWaitUserSpeech ignores echo within 450ms of lastPlayEn
   assert.equal(state.connected, true, 'Expected codexAbortSpeech() to keep WebRTC connection alive');
   sandbox.api.codexDisconnect();
 });
+
+test('meet-media.cjs codexRecordWakePcm rejects steady background noise and click+hum false triggers while keeping real speech', async () => {
+  // 1) Continuous faint Meet/room noise (0.010 RMS) never triggers wake capture
+  const noiseSandbox = createMediaSandbox({
+    scriptProcessorIntervalMs: 10,
+    sampleProvider: () => new Float32Array(2048).fill(0.010),
+  });
+  const noiseRes = await noiseSandbox.api.codexRecordWakePcm(2000, 180, 180);
+  assert.equal(noiseRes, null, 'Expected steady 0.010 background noise not to trigger wake capture');
+
+  // 2) Single click spike (0.030) followed by weak hum (0.009) lacks sustained strong voiced ticks -> resolves null
+  let clickIdx = 0;
+  const clickHumSandbox = createMediaSandbox({
+    scriptProcessorIntervalMs: 10,
+    sampleProvider: () => {
+      clickIdx++;
+      if (clickIdx === 1) return new Float32Array(2048).fill(0.030);
+      if (clickIdx <= 5) return new Float32Array(2048).fill(0.0095);
+      return new Float32Array(2048).fill(0.0003);
+    },
+  });
+  const clickHumRes = await clickHumSandbox.api.codexRecordWakePcm(2000, 1000, 180);
+  assert.equal(clickHumRes, null, 'Expected single click + weak hum not to trigger wake capture');
+
+  // 3) Weak burst (0.0145 for 4 frames) fails peak/energy gate -> resolves null
+  let weakIdx = 0;
+  const weakBurstSandbox = createMediaSandbox({
+    scriptProcessorIntervalMs: 10,
+    sampleProvider: () => {
+      weakIdx++;
+      return new Float32Array(2048).fill(weakIdx <= 4 ? 0.0145 : 0.0003);
+    },
+  });
+  const weakBurstRes = await weakBurstSandbox.api.codexRecordWakePcm(2000, 1000, 160);
+  assert.equal(weakBurstRes, null, 'Expected weak 0.0145 burst below peak gate to resolve null');
+
+  // 4) Real soft speech (0.035 RMS for 5 frames) still triggers cleanly
+  let speechIdx = 0;
+  const speechSandbox = createMediaSandbox({
+    scriptProcessorIntervalMs: 10,
+    sampleProvider: () => {
+      speechIdx++;
+      return new Float32Array(2048).fill(speechIdx <= 5 ? 0.035 : 0.0003);
+    },
+  });
+  const speechRes = await speechSandbox.api.codexRecordWakePcm(4000, 4000, 180);
+  assert.ok(speechRes && typeof speechRes.pcmBase64 === 'string' && speechRes.pcmBase64.length > 0);
+});
+
+test('meet-media.cjs codexWaitUserSpeech rejects steady room noise and single click + hum in follow-up mode', async () => {
+  // 1) Continuous 0.010 RMS room noise (0.020 in 256/1024 FakeAnalyserNode? -> use 0.020 in 256 samples = 0.010 RMS)
+  const noiseSandbox = createMediaSandbox({
+    sampleProvider: () => new Float32Array(256).fill(0.020),
+  });
+  await noiseSandbox.api.codexConnect();
+  const noiseRes = await noiseSandbox.api.codexWaitUserSpeech(320, 1000, 160);
+  assert.equal(noiseRes.spoke, false, 'Expected steady 0.010 RMS noise not to trigger follow-up turn');
+  assert.equal(noiseSandbox.createdGains[3].gain.value, 0);
+  noiseSandbox.api.codexDisconnect();
+
+  // 2) Single spike (0.030 RMS -> 0.060 in 256/1024) + weak hum (0.0095 RMS -> 0.019 in 256/1024)
+  let tick = 0;
+  const clickHumSandbox = createMediaSandbox({
+    sampleProvider: () => {
+      tick++;
+      if (tick === 1) return new Float32Array(256).fill(0.060);
+      if (tick <= 5) return new Float32Array(256).fill(0.019);
+      return new Float32Array(256).fill(0.0005);
+    },
+  });
+  await clickHumSandbox.api.codexConnect();
+  const clickHumRes = await clickHumSandbox.api.codexWaitUserSpeech(420, 1000, 160);
+  assert.equal(clickHumRes.spoke, false, 'Expected click + weak hum not to trigger spoke: true');
+  assert.equal(clickHumSandbox.createdGains[3].gain.value, 0);
+  clickHumSandbox.api.codexDisconnect();
+});

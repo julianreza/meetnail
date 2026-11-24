@@ -69,9 +69,42 @@ class HallucinationAndNoiseFilterTests(unittest.TestCase):
     def test_has_speech_energy_thresholds(self):
         silence = np.full(16000, 0.0004, dtype=np.float32)
         self.assertFalse(pipeline.has_speech_energy(silence))
+        weak_noise = np.full(16000, 0.007, dtype=np.float32)
+        self.assertFalse(
+            pipeline.has_speech_energy(
+                weak_noise,
+                min_peak=pipeline.WAKE_MIN_PEAK,
+                min_rms=pipeline.WAKE_MIN_RMS,
+                min_active_ms=pipeline.WAKE_MIN_ACTIVE_MS,
+            )
+        )
+        # Brief 40ms click inside 1s quiet room must fail wake active-duration pre-filter
+        click_only = np.full(16000, 0.001, dtype=np.float32)
+        t_click = np.linspace(0, 0.04, 640, endpoint=False, dtype=np.float32)
+        click_only[3200:3840] = 0.08 * np.sin(2 * np.pi * 300 * t_click)
+        self.assertFalse(
+            pipeline.has_speech_energy(
+                click_only,
+                min_peak=pipeline.WAKE_MIN_PEAK,
+                min_rms=pipeline.WAKE_MIN_RMS,
+                min_active_ms=pipeline.WAKE_MIN_ACTIVE_MS,
+            )
+        )
         t = np.linspace(0, 1.0, 16000, endpoint=False, dtype=np.float32)
         speech = 0.05 * np.sin(2 * np.pi * 220 * t).astype(np.float32)
         self.assertTrue(pipeline.has_speech_energy(speech))
+        # Soft real wake speech (~350ms active @ 0.035 amp inside 1s clip) passes wake pre-filter
+        soft_wake = np.full(16000, 0.001, dtype=np.float32)
+        t_word = np.linspace(0, 0.35, 5600, endpoint=False, dtype=np.float32)
+        soft_wake[3200:8800] = 0.035 * np.sin(2 * np.pi * 210 * t_word)
+        self.assertTrue(
+            pipeline.has_speech_energy(
+                soft_wake,
+                min_peak=pipeline.WAKE_MIN_PEAK,
+                min_rms=pipeline.WAKE_MIN_RMS,
+                min_active_ms=pipeline.WAKE_MIN_ACTIVE_MS,
+            )
+        )
 
 
 class WhisperTranscribeFilterTests(unittest.TestCase):
@@ -397,6 +430,14 @@ class TranscribeDaemonOptimizationTests(unittest.TestCase):
             pcm_path, _ = self._make_pcm_file(tmp, "sample.pcm")
             silence_path = tmp / "silence.pcm"
             silence_path.write_bytes(np.zeros(16000, dtype="<i2").tobytes())
+            weak_noise_path = tmp / "weak_noise.pcm"
+            t_noise = np.linspace(0, 1.0, 16000, endpoint=False, dtype=np.float32)
+            weak_noise_pcm = ((0.010 * np.sin(2 * np.pi * 120 * t_noise)) * 32768.0).astype("<i2")
+            weak_noise_path.write_bytes(weak_noise_pcm.tobytes())
+            click_path = tmp / "click.pcm"
+            click_arr = np.full(16000, 0.001, dtype=np.float32)
+            click_arr[1600:2240] = 0.08 * np.sin(2 * np.pi * 300 * np.linspace(0, 0.04, 640, endpoint=False))
+            click_path.write_bytes((click_arr * 32768.0).astype("<i2").tobytes())
 
             stdin_data = "\n".join([
                 json.dumps({"id": 10, "audio": str(pcm_path), "mode": "wake"}),
@@ -405,6 +446,8 @@ class TranscribeDaemonOptimizationTests(unittest.TestCase):
                 json.dumps({"id": 13, "audio": str(pcm_path), "mode": "transcript"}),
                 json.dumps({"id": 14, "audio": str(silence_path), "mode": "wake"}),
                 json.dumps({"id": 15, "audio": "relative/path.pcm", "mode": "wake"}),
+                json.dumps({"id": 16, "audio": str(weak_noise_path), "mode": "wake"}),
+                json.dumps({"id": 17, "audio": str(click_path), "mode": "wake"}),
                 "",
             ])
             fake_stdout = io.StringIO()
@@ -413,11 +456,11 @@ class TranscribeDaemonOptimizationTests(unittest.TestCase):
                 rc = pipeline._transcribe_daemon(_BeamModel(), None, 1)
 
         self.assertEqual(rc, 0)
-        # wake, wake-preview, preview -> beam_size=1; transcript -> beam_size=5
+        # wake, wake-preview, preview -> beam_size=1; transcript -> beam_size=5 (weak_noise and click must skip Whisper)
         self.assertEqual(recorded_beams, [1, 1, 1, 5])
 
         lines = [json.loads(line) for line in fake_stdout.getvalue().strip().splitlines()]
-        self.assertEqual(len(lines), 7)
+        self.assertEqual(len(lines), 9)
         for resp in lines[1:]:
             self.assertIn("whisperMs", resp)
             self.assertIsInstance(resp["whisperMs"], int)
@@ -426,6 +469,12 @@ class TranscribeDaemonOptimizationTests(unittest.TestCase):
         self.assertFalse(lines[5]["triggered"])
         self.assertEqual(lines[6]["id"], 15)
         self.assertIn("error", lines[6])
+        self.assertEqual(lines[7]["id"], 16)
+        self.assertFalse(lines[7]["triggered"])
+        self.assertEqual(lines[7]["raw"], "")
+        self.assertEqual(lines[8]["id"], 17)
+        self.assertFalse(lines[8]["triggered"])
+        self.assertEqual(lines[8]["raw"], "")
 
     def test_low_priority_flag_calls_os_nice_safely(self):
         with patch.object(pipeline.sys, "argv", ["agy-voice.py", "--transcribe-daemon", "--low-priority"]), \

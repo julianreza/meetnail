@@ -110,14 +110,40 @@ def is_self_echo(heard: str, recent_reply: str) -> bool:
     return len(heard_words) >= 2 and joined_heard in joined_reply
 
 
-def has_speech_energy(samples: np.ndarray, min_peak: float = 0.008, min_rms: float = 0.0018) -> bool:
+WAKE_MIN_PEAK = 0.022
+WAKE_MIN_RMS = 0.0055
+WAKE_MIN_FRAME_RMS = 0.012
+WAKE_MIN_ACTIVE_MS = 100.0
+
+
+def has_speech_energy(
+    samples: np.ndarray,
+    min_peak: float = 0.012,
+    min_rms: float = 0.0025,
+    *,
+    min_active_ms: float = 0.0,
+    min_frame_rms: float = WAKE_MIN_FRAME_RMS,
+) -> bool:
     if samples is None or len(samples) < 1600:
         return False
-    peak = float(np.max(np.abs(samples)))
+    arr = np.asarray(samples, dtype=np.float32)
+    peak = float(np.max(np.abs(arr)))
     if peak < min_peak:
         return False
-    rms = float(np.sqrt(np.mean(samples.astype(np.float32) ** 2)))
-    return rms >= min_rms
+    rms = float(np.sqrt(np.mean(arr * arr)))
+    if rms < min_rms:
+        return False
+    if min_active_ms > 0.0:
+        frame_samples = 320  # 20ms at 16kHz
+        n_frames = len(arr) // frame_samples
+        if n_frames <= 0:
+            return False
+        frames = arr[: n_frames * frame_samples].reshape(n_frames, frame_samples)
+        frame_rms = np.sqrt(np.mean(frames * frames, axis=1))
+        required_frames = max(1, int(np.ceil(min_active_ms / 20.0)))
+        if int(np.sum(frame_rms >= min_frame_rms)) < required_frames:
+            return False
+    return True
 
 
 def detect_wake_utterance(text: str) -> dict:
@@ -215,10 +241,18 @@ def transcribe(
     samples: np.ndarray,
     beam_size: int = 1,
     *,
-    min_peak: float = 0.008,
-    min_rms: float = 0.0018,
+    min_peak: float = 0.012,
+    min_rms: float = 0.0025,
+    min_active_ms: float = 0.0,
+    min_frame_rms: float = WAKE_MIN_FRAME_RMS,
 ) -> str:
-    if not has_speech_energy(samples, min_peak=min_peak, min_rms=min_rms):
+    if not has_speech_energy(
+        samples,
+        min_peak=min_peak,
+        min_rms=min_rms,
+        min_active_ms=min_active_ms,
+        min_frame_rms=min_frame_rms,
+    ):
         return ""
     segments, _ = _run_whisper_transcribe(model, samples, beam_size=beam_size)
     kept = [segment.text.strip() for segment in segments if _keep_segment(segment)]
@@ -449,8 +483,22 @@ def _transcribe_daemon(whisper: WhisperModel, models: pathlib.Path | None, next_
                 # Keep wake and preview paths responsive with greedy decoding; use beam_size=5 only for final transcripts.
                 beam_size = 5 if mode == "transcript" else 1
                 if mode in ("wake", "wake-preview"):
-                    if has_speech_energy(samples, min_peak=0.008, min_rms=0.0018):
-                        raw_heard = transcribe(whisper, samples, beam_size=beam_size)
+                    if has_speech_energy(
+                        samples,
+                        min_peak=WAKE_MIN_PEAK,
+                        min_rms=WAKE_MIN_RMS,
+                        min_active_ms=WAKE_MIN_ACTIVE_MS,
+                        min_frame_rms=WAKE_MIN_FRAME_RMS,
+                    ):
+                        raw_heard = transcribe(
+                            whisper,
+                            samples,
+                            beam_size=beam_size,
+                            min_peak=WAKE_MIN_PEAK,
+                            min_rms=WAKE_MIN_RMS,
+                            min_active_ms=WAKE_MIN_ACTIVE_MS,
+                            min_frame_rms=WAKE_MIN_FRAME_RMS,
+                        )
                         out = detect_wake_utterance(raw_heard)
                     else:
                         out = {"triggered": False, "raw": "", "prompt": "", "has_query": False}
@@ -460,7 +508,7 @@ def _transcribe_daemon(whisper: WhisperModel, models: pathlib.Path | None, next_
                     print(json.dumps(out, ensure_ascii=False), flush=True)
                     continue
                 entries = []
-                if has_speech_energy(samples, min_peak=0.008, min_rms=0.0018):
+                if has_speech_energy(samples, min_peak=0.012, min_rms=0.0025):
                     timeline = []
                     if worker is not None:
                         try:
@@ -959,9 +1007,13 @@ def run_turn(
 ) -> dict:
     t0 = time.monotonic()
     samples = decode_pcm16k(from_wav.resolve())
-    min_peak = 0.010 if is_follow_up else 0.008
-    min_rms = 0.0024 if is_follow_up else 0.0018
-    raw_heard = transcribe(whisper, samples, min_peak=min_peak, min_rms=min_rms)
+    if require_wake:
+        min_peak, min_rms, min_active_ms = WAKE_MIN_PEAK, WAKE_MIN_RMS, WAKE_MIN_ACTIVE_MS
+    elif is_follow_up:
+        min_peak, min_rms, min_active_ms = 0.015, 0.0035, 80.0
+    else:
+        min_peak, min_rms, min_active_ms = 0.012, 0.0025, 0.0
+    raw_heard = transcribe(whisper, samples, min_peak=min_peak, min_rms=min_rms, min_active_ms=min_active_ms)
     t_asr = time.monotonic()
     if not raw_heard:
         return {"heard": "", "reply": "", "skipped": True, "asr_s": round(t_asr - t0, 2)}

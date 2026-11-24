@@ -954,7 +954,7 @@ function installMedia(enableAvatar = false) {
         const blob = await new Promise((resolve, reject) => {
           const chunks = [];
           let ticks = 0, speechTicks = 0, voicedTicks = 0, silentTicks = 0, onsetStreak = 0;
-          let noiseFloor = 0.003;
+          let noiseFloor = autoListen ? 0.004 : 0.003;
           let started = !autoListen, aborted = false;
           let poll = null;
           const finish = val => {
@@ -1003,12 +1003,13 @@ function installMedia(enableAvatar = false) {
             for (let i = 0; i < meterBuf.length; i++) sum += meterBuf[i] * meterBuf[i];
             const rms = Math.sqrt(sum / meterBuf.length);
             const inEchoGuard = autoListen && (Date.now() - lastPlayEndedAt < 450);
-            const startThreshold = autoListen ? Math.max(0.0055, noiseFloor * 1.8) : 0.0035;
-            const sustainThreshold = autoListen ? Math.max(0.004, noiseFloor * 1.45) : 0.003;
+            const startThreshold = autoListen ? Math.max(0.014, noiseFloor * 2.2) : 0.0035;
+            const sustainThreshold = autoListen ? Math.max(0.009, noiseFloor * 1.6) : 0.003;
+            const spikeThreshold = autoListen ? Math.max(0.028, startThreshold * 2.0) : 0.015;
             if (!started) {
               if (!inEchoGuard && rms >= startThreshold) {
                 onsetStreak++;
-                if (onsetStreak >= 2 || rms >= 0.015) {
+                if (onsetStreak >= 2 || rms >= spikeThreshold) {
                   started = true;
                   ticks = 0;
                   speechTicks = 0;
@@ -1018,7 +1019,7 @@ function installMedia(enableAvatar = false) {
                 }
               } else {
                 onsetStreak = 0;
-                noiseFloor = Math.min(0.004, Math.max(0.002, noiseFloor * 0.9 + rms * 0.1));
+                noiseFloor = Math.min(0.012, Math.max(0.002, noiseFloor * 0.9 + rms * 0.1));
                 if (ticks >= maxIdleTicks) {
                   finish(null);
                 }
@@ -1054,7 +1055,7 @@ function installMedia(enableAvatar = false) {
         const data = await blob.arrayBuffer();
         const decoded = await context.decodeAudioData(data.slice(0));
         const width = Math.round(decoded.sampleRate * 0.02);
-        const frameThreshold = wasAutoListen ? 0.0045 : 0.003;
+        const frameThreshold = wasAutoListen ? 0.009 : 0.003;
         let voicedFrames = 0, peak = 0;
         for (let offset = 0; offset + width <= decoded.length; offset += width) {
           let energy = 0;
@@ -1179,6 +1180,8 @@ function installMedia(enableAvatar = false) {
         const maxSpeechTicks = Math.max(1, Math.ceil(maxSpeakMs / frameMs));
         const requiredSilentTicks = Math.max(2, Math.ceil(silenceMs / frameMs));
         const earlyAbortSilentTicks = Math.max(5, Math.ceil(360 / frameMs));
+        const minVoicedTicks = Math.max(2, Math.min(4, Math.ceil(160 / frameMs)));
+        const minStrongVoicedTicks = Math.max(2, minVoicedTicks - 1);
         const maxPreRollSamples = Math.round(targetRate * 0.2);
         const maxPcmBytes = 1024 * 1024;
         const maxPcmSamples = maxPcmBytes >> 1;
@@ -1231,9 +1234,14 @@ function installMedia(enableAvatar = false) {
           let ticks = 0;
           let speechTicks = 0;
           let voicedTicks = 0;
+          let strongVoicedTicks = 0;
           let silentTicks = 0;
           let onsetStreak = 0;
-          let noiseFloor = 0.003;
+          let onsetPeakRms = 0;
+          let onsetEnergySum = 0;
+          let peakRms = 0;
+          let voicedEnergySum = 0;
+          let noiseFloor = 0.004;
           let started = false;
           let aborted = false;
           let settled = false;
@@ -1245,7 +1253,19 @@ function installMedia(enableAvatar = false) {
             if (watchdog) { clearInterval(watchdog); watchdog = null; }
             if (processorNode) processorNode.onaudioprocess = null;
             if (window.__nailAbortRecord === onAbort) window.__nailAbortRecord = null;
-            if (!keep || aborted || !started || voicedTicks < 3 || recordedSamples <= 0) {
+            const avgVoicedRms = voicedTicks > 0 ? Math.sqrt(voicedEnergySum / voicedTicks) : 0;
+            const minPeakRms = Math.max(0.018, noiseFloor * 2.5);
+            const minVoicedRms = Math.max(0.013, noiseFloor * 1.9);
+            if (
+              !keep ||
+              aborted ||
+              !started ||
+              voicedTicks < minVoicedTicks ||
+              strongVoicedTicks < minStrongVoicedTicks ||
+              peakRms < minPeakRms ||
+              avgVoicedRms < minVoicedRms ||
+              recordedSamples <= 0
+            ) {
               if (fallbackToRecord && !aborted) {
                 resolve({__fallbackToRecord: true});
               } else {
@@ -1323,20 +1343,26 @@ function installMedia(enableAvatar = false) {
             const rms = Math.sqrt(sum / input.length);
             const now = Date.now();
             const inEchoGuard = now - lastPlayEndedAt < 450;
-            const startThreshold = Math.max(0.0055, noiseFloor * 1.8);
-            const sustainThreshold = Math.max(0.004, noiseFloor * 1.45);
+            const startThreshold = Math.max(0.014, noiseFloor * 2.2);
+            const sustainThreshold = Math.max(0.009, noiseFloor * 1.6);
+            const spikeThreshold = Math.max(0.028, startThreshold * 2.0);
             const pcmChunk = downsampleToInt16(input);
 
             if (!started) {
               if (!inEchoGuard && rms >= startThreshold) {
                 onsetStreak++;
-                if (onsetStreak >= 2 || rms >= 0.015) {
+                onsetPeakRms = Math.max(onsetPeakRms, rms);
+                onsetEnergySum += rms * rms;
+                if (onsetStreak >= 2 || rms >= spikeThreshold) {
                   started = true;
                   voiceStartedAt = now;
                   lastVoicedAt = now;
                   ticks = 0;
                   speechTicks = 1;
                   voicedTicks = onsetStreak;
+                  strongVoicedTicks = onsetStreak;
+                  peakRms = onsetPeakRms;
+                  voicedEnergySum = onsetEnergySum;
                   silentTicks = 0;
                   for (const prior of preRollChunks) {
                     if (appendRecordedChunk(prior)) { finish(true); return; }
@@ -1348,7 +1374,9 @@ function installMedia(enableAvatar = false) {
                 }
               } else {
                 onsetStreak = 0;
-                noiseFloor = Math.min(0.004, Math.max(0.002, noiseFloor * 0.9 + rms * 0.1));
+                onsetPeakRms = 0;
+                onsetEnergySum = 0;
+                noiseFloor = Math.min(0.012, Math.max(0.002, noiseFloor * 0.9 + rms * 0.1));
               }
               if (pcmChunk.length) {
                 preRollChunks.push(pcmChunk);
@@ -1373,6 +1401,9 @@ function installMedia(enableAvatar = false) {
             if (appendRecordedChunk(pcmChunk)) {
               if (rms >= sustainThreshold) {
                 voicedTicks++;
+                if (rms >= startThreshold) strongVoicedTicks++;
+                peakRms = Math.max(peakRms, rms);
+                voicedEnergySum += rms * rms;
                 lastVoicedAt = now;
               }
               finish(true);
@@ -1381,16 +1412,19 @@ function installMedia(enableAvatar = false) {
 
             if (rms >= sustainThreshold) {
               voicedTicks++;
+              if (rms >= startThreshold) strongVoicedTicks++;
+              peakRms = Math.max(peakRms, rms);
+              voicedEnergySum += rms * rms;
               silentTicks = 0;
               lastVoicedAt = now;
             } else {
               silentTicks++;
-              if (voicedTicks < 3 && silentTicks >= earlyAbortSilentTicks) {
+              if ((voicedTicks < minVoicedTicks || strongVoicedTicks < minStrongVoicedTicks) && silentTicks >= earlyAbortSilentTicks) {
                 aborted = true;
                 finish(false);
                 return;
               }
-              if (voicedTicks >= 3 && silentTicks >= requiredSilentTicks) {
+              if (voicedTicks >= minVoicedTicks && strongVoicedTicks >= minStrongVoicedTicks && silentTicks >= requiredSilentTicks) {
                 finish(true);
                 return;
               }
@@ -1575,18 +1609,47 @@ function installMedia(enableAvatar = false) {
         let voiceStartedAt = 0;
         let lastVoicedAt = 0;
         let voicedTicks = 0;
+        let strongVoicedTicks = 0;
         let silentTicks = 0;
         let onsetStreak = 0;
-        let noiseFloor = 0.003;
+        let onsetPeakRms = 0;
+        let onsetEnergySum = 0;
+        let voicedPeak = 0;
+        let voicedEnergySum = 0;
+        let noiseFloor = 0.004;
         let peak = 0;
         let settled = false;
+        const isValidSpeech = () => {
+          const minPeakRms = Math.max(0.018, noiseFloor * 2.5);
+          const minVoicedRms = Math.max(0.013, noiseFloor * 1.9);
+          const avgVoicedRms = voicedTicks > 0 ? Math.sqrt(voicedEnergySum / voicedTicks) : 0;
+          return (
+            voicedTicks >= 4 &&
+            strongVoicedTicks >= 3 &&
+            voicedPeak >= minPeakRms &&
+            avgVoicedRms >= minVoicedRms
+          );
+        };
+        const resetCandidate = () => {
+          voiceStartedAt = 0;
+          lastVoicedAt = 0;
+          voicedTicks = 0;
+          strongVoicedTicks = 0;
+          silentTicks = 0;
+          onsetStreak = 0;
+          onsetPeakRms = 0;
+          onsetEnergySum = 0;
+          voicedPeak = 0;
+          voicedEnergySum = 0;
+          try { bridge.inGain.gain.value = 0; } catch {}
+        };
         const cleanup = (aborted = false) => {
           if (settled) return;
           settled = true;
           clearInterval(poll);
           if (abortCodexSpeech === onAbort) abortCodexSpeech = null;
           try { bridge.inGain.gain.value = 0; } catch {}
-          const spoke = voicedTicks >= 4;
+          const spoke = !aborted && isValidSpeech();
           if (!spoke || aborted) {
             bridge.dcAcceptingTurn = false;
           }
@@ -1614,44 +1677,59 @@ function installMedia(enableAvatar = false) {
           const now = Date.now();
           const inEchoGuard = now - lastPlayEndedAt < 450;
           if (voiceStartedAt || !inEchoGuard) peak = Math.max(peak, rms);
-          const onsetThreshold = Math.max(0.0055, noiseFloor * 1.8);
-          const silenceThreshold = voicedTicks >= 2 && peak > 0.03
-            ? Math.max(0.0045, Math.min(0.011, peak * 0.14))
-            : Math.max(0.004, noiseFloor * 1.45);
+          const onsetThreshold = Math.max(0.012, noiseFloor * 2.2);
+          const spikeThreshold = Math.max(0.024, onsetThreshold * 1.8);
+          const silenceThreshold = voicedTicks >= 2 && voicedPeak > 0.03
+            ? Math.max(0.007, Math.min(0.014, voicedPeak * 0.16))
+            : Math.max(0.0085, noiseFloor * 1.6);
           const activeThreshold = voiceStartedAt ? silenceThreshold : onsetThreshold;
           if ((voiceStartedAt || !inEchoGuard) && rms >= activeThreshold) {
             if (!voiceStartedAt) {
               onsetStreak++;
-              if (onsetStreak >= 2 || rms >= 0.015) {
+              onsetPeakRms = Math.max(onsetPeakRms, rms);
+              onsetEnergySum += rms * rms;
+              if (onsetStreak >= 2 || rms >= spikeThreshold) {
                 voiceStartedAt = now;
                 lastVoicedAt = now;
                 bridge.inGain.gain.value = 1;
                 voicedTicks = onsetStreak;
+                strongVoicedTicks = onsetStreak;
+                voicedPeak = onsetPeakRms;
+                voicedEnergySum = onsetEnergySum;
                 silentTicks = 0;
               }
             } else {
               lastVoicedAt = now;
               voicedTicks++;
+              if (rms >= onsetThreshold) strongVoicedTicks++;
+              voicedPeak = Math.max(voicedPeak, rms);
+              voicedEnergySum += rms * rms;
               silentTicks = 0;
             }
           } else {
             onsetStreak = 0;
+            onsetPeakRms = 0;
+            onsetEnergySum = 0;
             if (!voiceStartedAt) {
-              noiseFloor = Math.min(0.0038, Math.max(0.002, noiseFloor * 0.9 + rms * 0.1));
+              noiseFloor = Math.min(0.012, Math.max(0.002, noiseFloor * 0.9 + rms * 0.1));
             } else {
               silentTicks++;
               if (voicedTicks < 4 && silentTicks >= 4) {
-                voiceStartedAt = 0;
-                lastVoicedAt = 0;
-                voicedTicks = 0;
-                silentTicks = 0;
-                onsetStreak = 0;
-                try { bridge.inGain.gain.value = 0; } catch {}
+                resetCandidate();
+              } else if (voicedTicks >= 4 && silentTicks >= requiredSilentTicks) {
+                if (isValidSpeech()) { cleanup(false); return; }
+                if (voicedPeak < Math.max(0.018, noiseFloor * 2.5)) {
+                  noiseFloor = Math.min(0.012, Math.max(noiseFloor, voicedPeak * 0.85));
+                }
+                resetCandidate();
               }
             }
-            if (voiceStartedAt && voicedTicks >= 4 && silentTicks >= requiredSilentTicks) { cleanup(false); return; }
           }
-          if (voicedTicks >= 4 && silentTicks >= 2) {
+          if (voiceStartedAt && voicedTicks >= 12 && voicedPeak < Math.max(0.018, noiseFloor * 2.5)) {
+            noiseFloor = Math.min(0.012, Math.max(noiseFloor, voicedPeak * 0.85));
+            resetCandidate();
+          }
+          if (isValidSpeech() && silentTicks >= 2) {
             bridge.outMeter.getFloatTimeDomainData(bridge.outBuf);
             let outSum = 0;
             for (let i = 0; i < bridge.outBuf.length; i++) outSum += bridge.outBuf[i] * bridge.outBuf[i];
@@ -1660,6 +1738,11 @@ function installMedia(enableAvatar = false) {
               cleanup(false);
               return;
             }
+          }
+          if (voiceStartedAt && now - startedAt >= maxWaitMs && !isValidSpeech()) {
+            resetCandidate();
+            cleanup(false);
+            return;
           }
           if (voiceStartedAt && now - voiceStartedAt >= maxSpeakMs) { cleanup(false); return; }
           if (!voiceStartedAt && now - startedAt >= maxWaitMs) { cleanup(false); }
