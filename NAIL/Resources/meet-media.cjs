@@ -279,6 +279,35 @@ function installMedia(enableAvatar = false) {
   let activePlayDone = null;
   let lastPlayEndedAt = 0;
   const activeRecordTrackAttach = new Set();
+  const waitForLiveTrack = async (attachedTracks, attachRemoteTrack, idleWaitMs, setNotify) => {
+    if (attachedTracks.size > 0) return true;
+    const waitMs = Math.max(0, Math.min(idleWaitMs, 1500));
+    if (waitMs <= 0) return attachedTracks.size > 0;
+    let aborted = false;
+    await new Promise(resolve => {
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        setNotify(null);
+        if (window.__nailAbortRecord === onAbort) window.__nailAbortRecord = null;
+        resolve();
+      };
+      const onAbort = () => {
+        aborted = true;
+        done();
+      };
+      setNotify(() => {
+        if (attachedTracks.size > 0) done();
+      });
+      window.__nailAbortRecord = onAbort;
+      const timer = setTimeout(done, waitMs);
+      for (const track of remote.keys()) attachRemoteTrack(track);
+      if (attachedTracks.size > 0) done();
+    });
+    return !aborted && attachedTracks.size > 0;
+  };
   let readRecordingPreview = null;
   const audioBase64 = data => {
     const bytes = new Uint8Array(data);
@@ -894,6 +923,7 @@ function installMedia(enableAvatar = false) {
         const meter = context.createAnalyser();
         meter.fftSize = 1024;
         const meterBuf = new Float32Array(meter.fftSize);
+        let notifyTrackAttached = null;
         const attachRemoteTrack = track => {
           if (!track || track.kind !== 'audio' || track.readyState !== 'live' || attachedTracks.has(track)) return;
           try {
@@ -902,18 +932,20 @@ function installMedia(enableAvatar = false) {
             source.connect(meter);
             sources.push(source);
             attachedTracks.add(track);
+            notifyTrackAttached?.();
           } catch {}
         };
         onTrackAttach = attachRemoteTrack;
         activeRecordTrackAttach.add(onTrackAttach);
         for (const track of remote.keys()) attachRemoteTrack(track);
         sources.push(preRoll);
+        if (!attachedTracks.size && !(await waitForLiveTrack(attachedTracks, attachRemoteTrack, idleWaitMs, fn => { notifyTrackAttached = fn; }))) {
+          window.__nailDiagnostics = {tracks: remote.size, live: attachedTracks.size,
+            muted: [...remote.keys()].filter(t => t.muted).length};
+          return '';
+        }
         window.__nailDiagnostics = {tracks: remote.size, live: attachedTracks.size,
           muted: [...remote.keys()].filter(t => t.muted).length};
-        if (!attachedTracks.size && !autoListen) {
-          // Wait briefly for newly arriving live tracks if manual turn was triggered during renegotiation.
-        }
-        if (!attachedTracks.size && autoListen) return '';
         const before = await rxStats();
         const maxIdleTicks = Math.max(1, Math.round(idleWaitMs / 100));
         const recorder = new MediaRecorder(mix.stream, {mimeType: 'audio/webm;codecs=opus', audioBitsPerSecond: 64000});
@@ -1094,6 +1126,7 @@ function installMedia(enableAvatar = false) {
       const attachedTracks = new Set();
       let onTrackAttach = null;
       let processorNode = null;
+      let result = null;
       try {
         const bus = context.createGain();
         bus.gain.value = 1;
@@ -1109,6 +1142,7 @@ function installMedia(enableAvatar = false) {
           try { sink.connect(context.destination); } catch {}
         }
         sources.push(bus, processorNode, sink);
+        let notifyTrackAttached = null;
         const attachRemoteTrack = track => {
           if (!track || track.kind !== 'audio' || track.readyState !== 'live' || attachedTracks.has(track)) return;
           try {
@@ -1116,17 +1150,25 @@ function installMedia(enableAvatar = false) {
             source.connect(bus);
             sources.push(source);
             attachedTracks.add(track);
+            notifyTrackAttached?.();
           } catch {}
         };
         onTrackAttach = attachRemoteTrack;
         activeRecordTrackAttach.add(onTrackAttach);
         for (const track of remote.keys()) attachRemoteTrack(track);
+        if (!attachedTracks.size && !(await waitForLiveTrack(attachedTracks, attachRemoteTrack, idleWaitMs, fn => { notifyTrackAttached = fn; }))) {
+          window.__nailDiagnostics = {
+            tracks: remote.size,
+            live: attachedTracks.size,
+            muted: [...remote.keys()].filter(t => t.muted).length,
+          };
+          return null;
+        }
         window.__nailDiagnostics = {
           tracks: remote.size,
           live: attachedTracks.size,
           muted: [...remote.keys()].filter(t => t.muted).length,
         };
-        if (!attachedTracks.size) return null;
 
         const srcRate = context.sampleRate || 48000;
         const targetRate = 16000;
@@ -1136,7 +1178,7 @@ function installMedia(enableAvatar = false) {
         const maxIdleTicks = Math.max(1, Math.ceil(idleWaitMs / frameMs));
         const maxSpeechTicks = Math.max(1, Math.ceil(maxSpeakMs / frameMs));
         const requiredSilentTicks = Math.max(2, Math.ceil(silenceMs / frameMs));
-        const earlyAbortSilentTicks = Math.max(3, Math.ceil(160 / frameMs));
+        const earlyAbortSilentTicks = Math.max(5, Math.ceil(360 / frameMs));
         const maxPreRollSamples = Math.round(targetRate * 0.2);
         const maxPcmBytes = 1024 * 1024;
         const maxPcmSamples = maxPcmBytes >> 1;
@@ -1178,7 +1220,7 @@ function installMedia(enableAvatar = false) {
           return out;
         };
 
-        return await new Promise(resolve => {
+        result = await new Promise(resolve => {
           const preRollChunks = [];
           let preRollSamples = 0;
           const recordedChunks = [];
@@ -1205,7 +1247,7 @@ function installMedia(enableAvatar = false) {
             if (window.__nailAbortRecord === onAbort) window.__nailAbortRecord = null;
             if (!keep || aborted || !started || voicedTicks < 3 || recordedSamples <= 0) {
               if (fallbackToRecord && !aborted) {
-                resolve(window.__nailMedia.record(Math.min(maxSpeakMs, 12000), true, idleWaitMs, false));
+                resolve({__fallbackToRecord: true});
               } else {
                 resolve(null);
               }
@@ -1253,7 +1295,7 @@ function installMedia(enableAvatar = false) {
           let fallbackToRecord = false;
           watchdog = setInterval(() => {
             const now = Date.now();
-            if (ticks === 0 && now - waitStartedAt >= 250) {
+            if (ticks === 0 && now - waitStartedAt >= 650) {
               fallbackToRecord = true;
               finish(false);
               return;
@@ -1366,6 +1408,10 @@ function installMedia(enableAvatar = false) {
           try { source.disconnect(); } catch {}
         }
       }
+      if (result?.__fallbackToRecord) {
+        return window.__nailMedia.record(Math.min(maxSpeakMs, 12000), true, idleWaitMs, false);
+      }
+      return result;
     },
     async play(encoded) {
       await start();
@@ -1414,7 +1460,7 @@ function installMedia(enableAvatar = false) {
       for (const track of remote.keys()) attachTrackToCodexBus(track);
 
       const inPreRoll = context.createDelay(1.0);
-      inPreRoll.delayTime.value = 0.10;
+      inPreRoll.delayTime.value = 0.14;
       const inGain = context.createGain();
       inGain.gain.value = 0;
       const inDest = context.createMediaStreamDestination();
@@ -1553,14 +1599,15 @@ function installMedia(enableAvatar = false) {
           let sum = 0;
           for (let i = 0; i < bridge.inBuf.length; i++) sum += bridge.inBuf[i] * bridge.inBuf[i];
           const rms = Math.sqrt(sum / bridge.inBuf.length);
-          peak = Math.max(peak, rms);
           const now = Date.now();
+          const inEchoGuard = now - lastPlayEndedAt < 450;
+          if (voiceStartedAt || !inEchoGuard) peak = Math.max(peak, rms);
           const onsetThreshold = Math.max(0.0055, noiseFloor * 1.8);
           const silenceThreshold = voicedTicks >= 2 && peak > 0.03
             ? Math.max(0.0045, Math.min(0.011, peak * 0.14))
             : Math.max(0.004, noiseFloor * 1.45);
           const activeThreshold = voiceStartedAt ? silenceThreshold : onsetThreshold;
-          if (rms >= activeThreshold) {
+          if ((voiceStartedAt || !inEchoGuard) && rms >= activeThreshold) {
             if (!voiceStartedAt) {
               onsetStreak++;
               if (onsetStreak >= 2 || rms >= 0.015) {
@@ -1673,6 +1720,9 @@ function installMedia(enableAvatar = false) {
         serverResponseInFlight: Boolean(bridge.serverResponseInFlight),
         dcEvents: bridge.dcEvents.slice(-12),
       };
+    },
+    codexAbortSpeech() {
+      abortCodexSpeech?.();
     },
     codexInterrupt() {
       if (codexBridge) {

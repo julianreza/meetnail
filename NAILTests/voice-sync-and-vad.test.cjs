@@ -188,9 +188,12 @@ test('CodexLiveSession fences late RPC notifications on disposed/completed turns
 function createMediaSandbox({
   sampleProvider,
   enableScriptProcessor = true,
+  scriptProcessorPumpsFrames = true,
   scriptProcessorIntervalMs = 15,
   hostname = 'meet.google.com',
   initialIceGatheringState = 'complete',
+  autoAttachRemoteTrack = true,
+  onMediaRecorderCreated = null,
 } = {}) {
   const source = readFileSync(join(__dirname, '../NAIL/Resources/meet-media.cjs'), 'utf8');
   // Extract installMedia(...) up to helper boundary before isAllowedMediaOrigin
@@ -203,11 +206,13 @@ function createMediaSandbox({
   const dcSent = [];
   let createdDataChannel = null;
   const createdDelays = [];
+  const createdGains = [];
+  const createdMediaStreamSources = [];
   const createdScriptProcessors = [];
   const createdPeers = [];
 
   class FakeGainNode {
-    constructor() { this.gain = {value: 1}; this.disconnected = false; }
+    constructor() { this.gain = {value: 1}; this.disconnected = false; createdGains.push(this); }
     connect() { return this; }
     disconnect() { this.disconnected = true; }
   }
@@ -229,7 +234,7 @@ function createMediaSandbox({
       this.bufferSize = bufferSize;
       this.onaudioprocess = null;
       this.disconnected = false;
-      this._timer = setInterval(() => {
+      this._timer = scriptProcessorPumpsFrames ? setInterval(() => {
         if (this.disconnected || typeof this.onaudioprocess !== 'function') return;
         const next = sampleProvider();
         const chan = new Float32Array(this.bufferSize);
@@ -246,7 +251,7 @@ function createMediaSandbox({
             getChannelData: () => chan,
           },
         });
-      }, scriptProcessorIntervalMs);
+      }, scriptProcessorIntervalMs) : null;
       createdScriptProcessors.push(this);
     }
     connect() { return this; }
@@ -311,7 +316,11 @@ function createMediaSandbox({
     createConstantSource() { return {offset: {value: 0}, connect() { return this; }, disconnect() {}, start() {}, stop() {}}; }
     createAnalyser() { return new FakeAnalyserNode(false); }
     createMediaStreamDestination() { return new FakeMediaStreamDestination(); }
-    createMediaStreamSource() { return {connect() {}, disconnect() {}}; }
+    createMediaStreamSource() {
+      const node = {disconnected: false, connect() {}, disconnect() { this.disconnected = true; }};
+      createdMediaStreamSources.push(node);
+      return node;
+    }
     createBuffer(_ch, length, sampleRate) { return new FakeAudioBuffer({length, sampleRate}); }
     createBufferSource() { return new FakeAudioBufferSourceNode(); }
     decodeAudioData(arr) {
@@ -348,6 +357,7 @@ function createMediaSandbox({
       this.ondataavailable = null;
       this.onstop = null;
       this._timer = null;
+      onMediaRecorderCreated?.(this);
     }
     start(timeslice = 120) {
       this.state = 'recording';
@@ -480,14 +490,19 @@ function createMediaSandbox({
   installFn(false);
   exposedApi = windowObj.__nailMedia;
   const meetPc = new windowObj.RTCPeerConnection();
-  meetPc.emit('track', {track: remoteTrack});
+  if (autoAttachRemoteTrack) {
+    meetPc.emit('track', {track: remoteTrack});
+  }
 
   return {
     windowObj,
     api: exposedApi,
     meetPc,
+    remoteTrack,
     dcSent,
     createdDelays,
+    createdGains,
+    createdMediaStreamSources,
     createdScriptProcessors,
     createdPeers,
     makeFakeTrack,
@@ -633,7 +648,7 @@ test('CodexLiveSession ignores benign cancellation errors and avoids splitting i
   );
 });
 
-test('meet-media.cjs codexConnect sets inPreRoll=0.10, outDelay=0.015, and uses 150ms srflx ICE timer', async () => {
+test('meet-media.cjs codexConnect sets inPreRoll=0.14, outDelay=0.015, and uses 150ms srflx ICE timer', async () => {
   const sandbox = createMediaSandbox({
     sampleProvider: () => new Float32Array(256).fill(0),
     initialIceGatheringState: 'gathering',
@@ -651,7 +666,7 @@ test('meet-media.cjs codexConnect sets inPreRoll=0.10, outDelay=0.015, and uses 
   assert.ok(sdp.includes('m=audio'));
   assert.ok(elapsed < 280, `Expected srflx ICE gathering timer (~150ms) to finish well under 280ms, got ${elapsed}ms`);
   assert.equal(sandbox.createdDelays.length, 2);
-  assert.equal(sandbox.createdDelays[0].delayTime.value, 0.10);
+  assert.equal(sandbox.createdDelays[0].delayTime.value, 0.14);
   assert.equal(sandbox.createdDelays[1].delayTime.value, 0.015);
   sandbox.api.codexDisconnect();
 });
@@ -737,7 +752,7 @@ test('meet-media.cjs codexRecordWakePcm aborts early on click false-start and re
 
   const res = await sandbox.api.codexRecordWakePcm(8000, 12000, 450);
   assert.equal(res, null);
-  assert.ok(chunkIdx <= 10, `Expected early click abort within ~6 chunks, got ${chunkIdx}`);
+  assert.ok(chunkIdx <= 14, `Expected early click abort within ~11 chunks (~380ms silence), got ${chunkIdx}`);
   assert.equal(sandbox.createdScriptProcessors[0].disconnected, true);
 });
 
@@ -809,5 +824,153 @@ test('meet-media.cjs codexCloseOut({keepTeamsSenders: true}) keeps Teams virtual
   assert.notEqual(sender.track, origTrack);
   await sandbox.api.codexCloseOut();
   assert.equal(sender.track, origTrack);
+  sandbox.api.codexDisconnect();
+});
+
+test('meet-media.cjs codexRecordWakePcm disconnects nodes BEFORE calling record() fallback on 650ms cold watchdog timeout', async () => {
+  let frame = 0;
+  let stateAtRecordStart = null;
+  const sandbox = createMediaSandbox({
+    scriptProcessorPumpsFrames: false,
+    sampleProvider: () => {
+      frame++;
+      return new Float32Array(256).fill(frame <= 2 ? 0.03 : 0.0003);
+    },
+    onMediaRecorderCreated: () => {
+      const sp = sandbox.createdScriptProcessors[0];
+      // The first 2 FakeGainNodes are micBus and keepGain from start(); the next 2 are bus and sink from codexRecordWakePcm
+      const wakeGains = sandbox.createdGains.slice(2, 4);
+      // The first MediaStreamSource is codexRecordWakePcm's remoteTrack source; the second is record()'s remoteTrack source
+      const wakeSource = sandbox.createdMediaStreamSources[0];
+      stateAtRecordStart = {
+        spDisconnected: sp?.disconnected ?? false,
+        spHandlerCleared: sp?.onaudioprocess === null,
+        busDisconnected: wakeGains[0]?.disconnected ?? false,
+        sinkDisconnected: wakeGains[1]?.disconnected ?? false,
+        wakeSourceDisconnected: wakeSource?.disconnected ?? false,
+      };
+    },
+  });
+
+  const startedAt = Date.now();
+  const res = await sandbox.api.codexRecordWakePcm(8000, 12000, 450);
+  const elapsed = Date.now() - startedAt;
+
+  assert.equal(res, '');
+  assert.ok(elapsed >= 600, `Expected cold ScriptProcessor watchdog to wait ~650ms before fallback, got ${elapsed}ms`);
+  assert.ok(stateAtRecordStart, 'Expected record() fallback to instantiate MediaRecorder');
+  assert.deepEqual(stateAtRecordStart, {
+    spDisconnected: true,
+    spHandlerCleared: true,
+    busDisconnected: true,
+    sinkDisconnected: true,
+    wakeSourceDisconnected: true,
+  });
+});
+
+test('meet-media.cjs codexRecordWakePcm and record() wait for late-arriving track when attachedTracks.size === 0 and respect __nailAbortRecord', async () => {
+  let chunkIdx = 0;
+  const sandbox = createMediaSandbox({
+    autoAttachRemoteTrack: false,
+    scriptProcessorIntervalMs: 10,
+    sampleProvider: () => {
+      if (sandbox.windowObj.__nailDiagnostics?.live === 0) {
+        return new Float32Array(2048).fill(0);
+      }
+      chunkIdx++;
+      if (chunkIdx <= 4) return new Float32Array(2048).fill(0.22);
+      return new Float32Array(2048).fill(0.0002);
+    },
+  });
+
+  // 1) Track arrives 60ms after codexRecordWakePcm starts -> attaches and records speech
+  let settledEarly = false;
+  const wakePromise = sandbox.api.codexRecordWakePcm(4000, 4000, 160).then(r => {
+    settledEarly = true;
+    return r;
+  });
+  await new Promise(r => setTimeout(r, 60));
+  assert.equal(settledEarly, false, 'Expected codexRecordWakePcm to wait for late track instead of returning null immediately');
+  sandbox.meetPc.emit('track', {track: sandbox.remoteTrack});
+  const res = await wakePromise;
+  assert.ok(res && typeof res.pcmBase64 === 'string' && res.pcmBase64.length > 0);
+  assert.equal(res.sampleRate, 16000);
+
+  // 2) Respects window.__nailAbortRecord() while waiting for a track in codexRecordWakePcm
+  const abortSandbox = createMediaSandbox({
+    autoAttachRemoteTrack: false,
+    sampleProvider: () => new Float32Array(2048).fill(0),
+  });
+  const abortStart = Date.now();
+  const abortWakePromise = abortSandbox.api.codexRecordWakePcm(4000, 4000, 180);
+  await new Promise(r => setTimeout(r, 30));
+  assert.equal(typeof abortSandbox.windowObj.__nailAbortRecord, 'function');
+  abortSandbox.windowObj.__nailAbortRecord();
+  const abortRes = await abortWakePromise;
+  assert.equal(abortRes, null);
+  assert.ok(Date.now() - abortStart < 300, 'Expected __nailAbortRecord to cancel empty-track wait immediately');
+
+  // 3) Respects window.__nailAbortRecord() while waiting for a track in record()
+  const recStart = Date.now();
+  const abortRecPromise = abortSandbox.api.record(4000, true, 4000, false);
+  await new Promise(r => setTimeout(r, 30));
+  assert.equal(typeof abortSandbox.windowObj.__nailAbortRecord, 'function');
+  abortSandbox.windowObj.__nailAbortRecord();
+  const abortRecRes = await abortRecPromise;
+  assert.equal(abortRecRes, '');
+  assert.ok(Date.now() - recStart < 300, 'Expected __nailAbortRecord to cancel record() empty-track wait immediately');
+});
+
+test('meet-media.cjs codexRecordWakePcm tolerates a ~200ms mid-utterance pause after 2-frame onset without aborting', async () => {
+  let chunkIdx = 0;
+  const sandbox = createMediaSandbox({
+    scriptProcessorIntervalMs: 10,
+    sampleProvider: () => {
+      chunkIdx++;
+      // Chunks 1..2: 2-frame greeting onset ("Halo", voicedTicks = 2 < 3)
+      if (chunkIdx <= 2) return new Float32Array(2048).fill(0.20);
+      // Chunks 3..7: 5 silent chunks (~213ms pause at 42.67ms/chunk; > old 170ms limit, < new 380ms limit)
+      if (chunkIdx <= 7) return new Float32Array(2048).fill(0.0002);
+      // Chunks 8..11: continuation ("Nail, tolong...", 4 voiced chunks -> voicedTicks = 6 >= 3)
+      if (chunkIdx <= 11) return new Float32Array(2048).fill(0.25);
+      // Chunks 12+: trailing silence to complete turn
+      return new Float32Array(2048).fill(0.0002);
+    },
+  });
+
+  const res = await sandbox.api.codexRecordWakePcm(4000, 4000, 180);
+  assert.ok(res, 'Expected utterance with ~200ms pause after 2-frame onset not to early-abort');
+  assert.equal(res.sampleRate, 16000);
+  assert.ok(res.durationMs >= 400, `Expected full utterance duration >= 400ms, got ${res.durationMs}ms`);
+});
+
+test('meet-media.cjs codexWaitUserSpeech ignores echo within 450ms of lastPlayEndedAt and respects codexAbortSpeech()', async () => {
+  let emitVoice = true;
+  const sandbox = createMediaSandbox({
+    sampleProvider: () => new Float32Array(256).fill(emitVoice ? 0.04 : 0.0003),
+  });
+
+  await sandbox.api.codexConnect();
+  // Opening and closing Codex output stamps lastPlayEndedAt = Date.now()
+  await sandbox.api.codexOpenOut();
+  await sandbox.api.codexCloseOut();
+
+  // Turn off voice after 180ms (still well within the 450ms echo guard window)
+  setTimeout(() => { emitVoice = false; }, 180);
+  const echoRes = await sandbox.api.codexWaitUserSpeech(320, 1000, 160);
+  assert.equal(echoRes.spoke, false, 'Expected tail echo within 450ms of lastPlayEndedAt to be ignored');
+
+  // Wait past the 450ms echo guard window, then verify codexAbortSpeech() aborts cleanly without disconnecting WebRTC
+  const abortStart = Date.now();
+  const waitPromise = sandbox.api.codexWaitUserSpeech(5000, 12000, 350);
+  await new Promise(r => setTimeout(r, 50));
+  sandbox.api.codexAbortSpeech();
+  const abortRes = await waitPromise;
+  assert.equal(abortRes.aborted, true);
+  assert.equal(abortRes.spoke, false);
+  assert.ok(Date.now() - abortStart < 350, 'Expected codexAbortSpeech() to resolve codexWaitUserSpeech immediately');
+
+  const state = await sandbox.api.codexState();
+  assert.equal(state.connected, true, 'Expected codexAbortSpeech() to keep WebRTC connection alive');
   sandbox.api.codexDisconnect();
 });
