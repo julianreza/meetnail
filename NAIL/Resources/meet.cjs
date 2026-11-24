@@ -938,6 +938,36 @@ function appendLatencyLog(entry, {
   }
 }
 
+function buildWakeDiagEntry(input = {}) {
+  return {
+    ts: typeof input.ts === 'string' && input.ts ? input.ts : new Date().toISOString(),
+    triggered: Boolean(input.triggered),
+    raw: typeof input.raw === 'string' ? input.raw : String(input.raw ?? ''),
+    prompt: typeof input.prompt === 'string' ? input.prompt : String(input.prompt ?? ''),
+    whisperMs: toNullableMs(input.whisperMs),
+    durationMs: toNullableMs(input.durationMs),
+    pcmMode: Boolean(input.pcmMode),
+  };
+}
+
+function appendWakeDiagLog(entry, {
+  logDirPath = join(homedir(), 'Library/Logs/Nail'),
+  logFilePath,
+  mkdirSyncFn = mkdirSync,
+  appendFileSyncFn = appendFileSync,
+} = {}) {
+  try {
+    const normalized = buildWakeDiagEntry(entry);
+    const targetFile = logFilePath || join(logDirPath, 'wake-diag.jsonl');
+    const targetDir = logFilePath ? dirname(logFilePath) : logDirPath;
+    mkdirSyncFn(targetDir, {recursive: true});
+    appendFileSyncFn(targetFile, `${JSON.stringify(normalized)}\n`);
+    return normalized;
+  } catch {
+    return null;
+  }
+}
+
 function createPresentationSlidePoller({
   intervalMs = 4000,
   getState,
@@ -1074,6 +1104,8 @@ async function captureCodexHandsFreeWake(wc, work, {
         vadSilenceMs: Number.isFinite(clip.silenceWaitMs) ? clip.silenceWaitMs : null,
         captureToWorkerMs,
         trueSpeechEndedAtMs: Number.isFinite(clip.speechEndedAtMs) ? clip.speechEndedAtMs : null,
+        durationMs: Number.isFinite(clip.durationMs) ? clip.durationMs : null,
+        pcmMode: true,
       },
     };
   }
@@ -1095,6 +1127,8 @@ async function captureCodexHandsFreeWake(wc, work, {
       vadSilenceMs: null,
       captureToWorkerMs,
       trueSpeechEndedAtMs: null,
+      durationMs: null,
+      pcmMode: false,
     },
   };
 }
@@ -1122,6 +1156,7 @@ async function executeCodexHandsFreeTurn({
   checkCodexWake,
   emit = () => {},
   logVoiceError = async () => {},
+  appendWakeDiagLogFn = appendWakeDiagLog,
   onActiveWakeAbort = () => {},
   isStopping = () => false,
   isTurnInterrupted = () => false,
@@ -1211,6 +1246,16 @@ async function executeCodexHandsFreeTurn({
         ...preTimingBase,
         whisperMs,
       };
+      if ((wake.raw && String(wake.raw).trim()) || (preTimingBase?.durationMs ?? 0) >= 300) {
+        appendWakeDiagLogFn({
+          triggered: Boolean(wake.triggered),
+          raw: wake.raw ?? '',
+          prompt: wake.prompt ?? '',
+          whisperMs: preTiming?.whisperMs ?? null,
+          durationMs: preTimingBase?.durationMs ?? null,
+          pcmMode: Boolean(preTimingBase?.pcmMode),
+        });
+      }
     }
   } catch (error) {
     setInStandby(false);
@@ -1334,15 +1379,24 @@ async function executeCodexTurnWithFollowUp({
     try {
       while (!isStopping() && !isTurnInterrupted() && !isTurnRequested() && !turnAbort.signal.aborted) {
         emit('voice-followup');
-        const followUpResult = await codexSession.runLiveTurn(wc, {
-          unmuteMeet,
-          signal: turnAbort.signal,
-          progress: emit,
-          maxWaitMs: 7000,
-          silenceMs: 350,
-          skipUnmute: true,
-          keepFollowUpMic: true,
-        });
+        let followUpResult;
+        try {
+          followUpResult = await codexSession.runLiveTurn(wc, {
+            unmuteMeet,
+            signal: turnAbort.signal,
+            progress: emit,
+            maxWaitMs: 7000,
+            silenceMs: 350,
+            skipUnmute: true,
+            keepFollowUpMic: true,
+          });
+        } catch (followErr) {
+          if (followErr?.message === 'voice-codex-no-transcript') {
+            await logVoiceError(followErr);
+            break;
+          }
+          throw followErr;
+        }
         if (isStopping() || isTurnInterrupted() || turnAbort.signal.aborted ||
             followUpResult?.aborted || followUpResult?.noAudio) {
           break;
@@ -2243,8 +2297,10 @@ if (process.versions.electron) {
   }
 
   async function logVoiceError(error) {
-    lastVoiceErrorAt = Date.now();
-    inVoiceStandby = false;
+    if (error?.message !== 'voice-codex-no-transcript') {
+      lastVoiceErrorAt = Date.now();
+      inVoiceStandby = false;
+    }
     try {
       const dir = join(require('node:os').homedir(), 'Library/Logs/Nail');
       mkdirSync(dir, {recursive: true});
@@ -3181,6 +3237,8 @@ module.exports = {
   createWakePriorityGate,
   buildLatencyLogEntry,
   appendLatencyLog,
+  buildWakeDiagEntry,
+  appendWakeDiagLog,
   createPresentationSlidePoller,
   captureCodexHandsFreeWake,
   executeCodexHandsFreeTurn,

@@ -361,9 +361,12 @@ test('CodexLiveSession._awaitReplyTurn resets wedged WebRTC at noTranscriptTimeo
   assert.ok(rpcCalls.some(c => c.method === 'thread/realtime/stop'));
 });
 
-test('CodexLiveSession defaults idleTimeoutMs to 600s, supports prewarmConnection, and completes dcReplyDone at 200ms', async () => {
+test('CodexLiveSession defaults idleTimeoutMs to 600s and noTranscriptTimeoutMs to 7000ms, supports prewarmConnection, and completes dcReplyDone at 200ms', async () => {
   const session = new CodexLiveSession();
   assert.equal(session.idleTimeoutMs, 600_000);
+  assert.equal(session.noTranscriptTimeoutMs, 7000);
+  assert.equal(session.noReplyTimeoutMs, 25_000);
+  assert.equal(session.turnTimeoutMs, 60_000);
   assert.equal(session._notesSyncPromise, null);
   assert.equal(session._lastSyncedSlideText, '');
 

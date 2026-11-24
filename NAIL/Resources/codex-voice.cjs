@@ -113,7 +113,7 @@ class CodexLiveSession {
     voice = 'cove',
     speakingStyle = 'casual',
     idleTimeoutMs = 600_000,
-    noTranscriptTimeoutMs = 15_000,
+    noTranscriptTimeoutMs = 7_000,
     noReplyTimeoutMs = 25_000,
     turnTimeoutMs = 60_000,
     notesMemory = null,

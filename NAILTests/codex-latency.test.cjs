@@ -10,6 +10,8 @@ const {
   createWakePriorityGate,
   buildLatencyLogEntry,
   appendLatencyLog,
+  buildWakeDiagEntry,
+  appendWakeDiagLog,
   createPresentationSlidePoller,
   executeCodexHandsFreeTurn,
   executeCodexTurnWithFollowUp,
@@ -164,6 +166,7 @@ test('Hands-Free Turn 1 fast path uses codexRecordWakePcm + format:pcm16k + prew
       };
     },
     emit: ev => events.push(ev),
+    appendWakeDiagLogFn: () => {},
     platform: 'meet',
     presentationReadingEnabled: false,
     runCodexTextTurn: async (_wc, _read, _click, prompt, turnOpts) => {
@@ -217,6 +220,7 @@ test('Hands-Free Turn 1 falls back gracefully to record() + wake.webm when codex
     read: async () => ({}),
     click: async () => true,
     codexSession: {prewarmConnection: () => {}},
+    appendWakeDiagLogFn: () => {},
     checkCodexWake: async (audioPath, mode, opts) => {
       wakeRequests.push({audioPath, mode, opts});
       return {
@@ -917,4 +921,287 @@ test('Google Meet unmuteAndVerifyMic retries click(after.unmute) once if sending
   assert.equal(clickCount, 2);
   assert.equal(state.restoreMute, true);
 });
+
+test('Follow-up voice-codex-no-transcript logs via logVoiceError, restores mute + Teams senders, emits voice-standby, and does not emit error event', async () => {
+  const events = [];
+  const jsCalls = [];
+  const loggedErrors = [];
+  let restoreMuteCalls = 0;
+
+  const wc = {
+    isDestroyed: () => false,
+    async executeJavaScript(script) {
+      jsCalls.push(script);
+      return null;
+    },
+  };
+
+  const noTranscriptErr = new Error('voice-codex-no-transcript');
+  const codexSession = {
+    async runLiveTurn() {
+      throw noTranscriptErr;
+    },
+  };
+
+  await executeCodexTurnWithFollowUp({
+    wc,
+    read: async () => ({}),
+    click: async () => true,
+    codexSession,
+    unmuteAndVerifyMicFn: async (_wc, _read, _click, state) => {
+      state.restoreMute = true;
+      return true;
+    },
+    restoreMeetMuteFn: async (_wc, _read, _click, shouldRestore) => {
+      if (shouldRestore) restoreMuteCalls++;
+    },
+    emit: ev => events.push(ev),
+    appendLatencyLogFn: () => {},
+    logVoiceError: async err => { loggedErrors.push(err); },
+    platform: 'teams',
+    provider: 'codex',
+    mode: 'hands-free',
+    executeTurn: async opts => {
+      await opts.unmuteMeet();
+      return {
+        heard: 'Nail, apa kabar?',
+        reply: 'Kabar baik, siap bantu rapat.',
+        heardAtMs: 1000,
+        replyAtMs: 1400,
+        latencyMs: 400,
+      };
+    },
+  });
+
+  assert.deepEqual(loggedErrors, [noTranscriptErr]);
+  assert.equal(restoreMuteCalls, 1);
+  assert.ok(jsCalls.some(s => s.includes('restoreTeamsSenders')));
+  assert.ok(events.includes('voice-followup'));
+  assert.equal(events[events.length - 1], 'voice-standby');
+  assert.equal(events.includes('voice-codex-no-transcript'), false);
+  assert.equal(events.includes('voice-failed'), false);
+
+  // Non-no-transcript follow-up error (e.g. voice-codex-quota) still surfaces as HUD error event
+  const fatalEvents = [];
+  const fatalLogged = [];
+  const quotaErr = new Error('voice-codex-quota');
+  await executeCodexTurnWithFollowUp({
+    wc,
+    read: async () => ({}),
+    click: async () => true,
+    codexSession: {
+      async runLiveTurn() {
+        throw quotaErr;
+      },
+    },
+    unmuteAndVerifyMicFn: async (_wc, _read, _click, state) => {
+      state.restoreMute = true;
+      return true;
+    },
+    restoreMeetMuteFn: async () => {},
+    emit: ev => fatalEvents.push(ev),
+    appendLatencyLogFn: () => {},
+    logVoiceError: async err => { fatalLogged.push(err); },
+    platform: 'meet',
+    provider: 'codex',
+    mode: 'hands-free',
+    executeTurn: async opts => {
+      await opts.unmuteMeet();
+      return {heard: 'Halo', reply: 'Halo juga', heardAtMs: 100, replyAtMs: 200, latencyMs: 100};
+    },
+  });
+  assert.deepEqual(fatalLogged, [quotaErr]);
+  assert.ok(fatalEvents.includes('voice-codex-quota'));
+  assert.equal(fatalEvents.includes('voice-standby'), false);
+
+  // Primary manual turn throwing voice-codex-no-transcript still emits voice-codex-no-transcript
+  const manualEvents = [];
+  const manualLogged = [];
+  await executeCodexTurnWithFollowUp({
+    wc,
+    read: async () => ({}),
+    click: async () => true,
+    codexSession: {},
+    emit: ev => manualEvents.push(ev),
+    appendLatencyLogFn: () => {},
+    logVoiceError: async err => { manualLogged.push(err); },
+    mode: 'manual',
+    executeTurn: async () => {
+      throw new Error('voice-codex-no-transcript');
+    },
+  });
+  assert.equal(manualLogged.length, 1);
+  assert.equal(manualLogged[0].message, 'voice-codex-no-transcript');
+  assert.deepEqual(manualEvents, ['voice-codex-no-transcript']);
+});
+
+test('executeCodexHandsFreeTurn logs wake diagnostics via appendWakeDiagLogFn and appendWakeDiagLog writes valid JSONL', async () => {
+  const diagEntries = [];
+  const pcmBytes = Buffer.from([1, 0, -1, 0, 64, 2, -64, -2]);
+  let nextClip = null;
+  let nextWakeRes = null;
+
+  const wc = {
+    isDestroyed: () => false,
+    async executeJavaScript(script) {
+      if (script.includes('codexRecordWakePcm')) {
+        return nextClip;
+      }
+      return null;
+    },
+  };
+
+  const runCycle = async () => {
+    await executeCodexHandsFreeTurn({
+      wc,
+      read: async () => ({}),
+      click: async () => true,
+      codexSession: {prewarmConnection: () => {}},
+      checkCodexWake: async () => nextWakeRes,
+      appendWakeDiagLogFn: entry => diagEntries.push(entry),
+      runCodexTextTurn: async () => {},
+      runCodexLiveTurn: async () => {},
+      runCodexPresentationTurn: async () => {},
+    });
+  };
+
+  // 1) triggered: false with non-empty raw -> logged
+  nextClip = {
+    pcmBase64: pcmBytes.toString('base64'),
+    sampleRate: 16000,
+    silenceWaitMs: 450,
+    speechEndedAtMs: 1700000002000,
+    durationMs: 220,
+  };
+  nextWakeRes = {
+    triggered: false,
+    raw: 'lanjut bahas agenda berikutnya',
+    prompt: '',
+    has_query: false,
+    whisperMs: 95,
+  };
+  await runCycle();
+  assert.equal(diagEntries.length, 1);
+  assert.deepEqual(diagEntries[0], {
+    triggered: false,
+    raw: 'lanjut bahas agenda berikutnya',
+    prompt: '',
+    whisperMs: 95,
+    durationMs: 220,
+    pcmMode: true,
+  });
+
+  // 2) triggered: false with empty raw but durationMs >= 300 -> logged
+  nextClip = {
+    pcmBase64: pcmBytes.toString('base64'),
+    sampleRate: 16000,
+    silenceWaitMs: 450,
+    speechEndedAtMs: 1700000003000,
+    durationMs: 480,
+  };
+  nextWakeRes = {
+    triggered: false,
+    raw: '',
+    prompt: '',
+    has_query: false,
+    whisperMs: 88,
+  };
+  await runCycle();
+  assert.equal(diagEntries.length, 2);
+  assert.deepEqual(diagEntries[1], {
+    triggered: false,
+    raw: '',
+    prompt: '',
+    whisperMs: 88,
+    durationMs: 480,
+    pcmMode: true,
+  });
+
+  // 3) triggered: false with empty raw and durationMs < 300 -> skipped
+  nextClip = {
+    pcmBase64: pcmBytes.toString('base64'),
+    sampleRate: 16000,
+    silenceWaitMs: 450,
+    speechEndedAtMs: 1700000003500,
+    durationMs: 180,
+  };
+  nextWakeRes = {
+    triggered: false,
+    raw: '   ',
+    prompt: '',
+    has_query: false,
+    whisperMs: 50,
+  };
+  await runCycle();
+  assert.equal(diagEntries.length, 2);
+
+  // 4) triggered: true wake attempt -> logged
+  nextClip = {
+    pcmBase64: pcmBytes.toString('base64'),
+    sampleRate: 16000,
+    silenceWaitMs: 450,
+    speechEndedAtMs: 1700000004000,
+    durationMs: 1320,
+  };
+  nextWakeRes = {
+    triggered: true,
+    raw: 'Halo Nail tolong rangkum rapat',
+    prompt: 'tolong rangkum rapat',
+    has_query: true,
+    whisperMs: 134,
+  };
+  await runCycle();
+  assert.equal(diagEntries.length, 3);
+  assert.deepEqual(diagEntries[2], {
+    triggered: true,
+    raw: 'Halo Nail tolong rangkum rapat',
+    prompt: 'tolong rangkum rapat',
+    whisperMs: 134,
+    durationMs: 1320,
+    pcmMode: true,
+  });
+
+  // 5) buildWakeDiagEntry and appendWakeDiagLog write valid JSONL
+  const tempDir = mkdtempSync(join(tmpdir(), 'nail-wake-diag-test-'));
+  const logFilePath = join(tempDir, 'Logs', 'Nail', 'wake-diag.jsonl');
+  try {
+    const written1 = appendWakeDiagLog({
+      ts: '2026-11-24T02:50:00.000Z',
+      ...diagEntries[0],
+    }, {logFilePath});
+    const written2 = appendWakeDiagLog({
+      ts: '2026-11-24T02:50:05.000Z',
+      ...diagEntries[2],
+    }, {logFilePath});
+
+    assert.deepEqual(written1, buildWakeDiagEntry({
+      ts: '2026-11-24T02:50:00.000Z',
+      ...diagEntries[0],
+    }));
+    assert.deepEqual(written2, {
+      ts: '2026-11-24T02:50:05.000Z',
+      triggered: true,
+      raw: 'Halo Nail tolong rangkum rapat',
+      prompt: 'tolong rangkum rapat',
+      whisperMs: 134,
+      durationMs: 1320,
+      pcmMode: true,
+    });
+
+    const lines = readFileSync(logFilePath, 'utf8').trim().split('\n');
+    assert.equal(lines.length, 2);
+    assert.deepEqual(JSON.parse(lines[0]), written1);
+    assert.deepEqual(JSON.parse(lines[1]), written2);
+
+    // Safe error catching on FS failure
+    const failed = appendWakeDiagLog(diagEntries[2], {
+      logFilePath,
+      appendFileSyncFn: () => { throw new Error('disk full'); },
+    });
+    assert.equal(failed, null);
+  } finally {
+    rmSync(tempDir, {recursive: true, force: true});
+  }
+});
+
 
