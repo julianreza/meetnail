@@ -354,6 +354,7 @@ final class MeetSession {
         avatarTransport.clearPending()
         avatarSpeech = AvatarSpeechEnvelope()
         avatarLastTurn = 0
+        MeetAvatarRenderer.resetCache()
     }
 
     private func clearMeetingAvatar() {
@@ -386,32 +387,90 @@ final class MeetSession {
         avatarTransport.connect(path: directory.appendingPathComponent("frames").path)
         avatarRender = Task { @MainActor [weak self] in
             let started = ProcessInfo.processInfo.systemUptime
+            var lastSentKey: MeetAvatarFrameKey?
+            var staticJPEGCache: [MeetAvatarFrameKey: Data] = [:]
+
             while !Task.isCancelled {
-                guard let self, self.avatarRequest.enabled, self.avatarRequest.revision == revision else { return }
-                let time = ProcessInfo.processInfo.systemUptime
-                let phase = time - started
-                let blink = phase.truncatingRemainder(dividingBy: 3.8)
-                let blinkScale = 1 - 0.86 * max(0, 1 - abs(blink - 3.45) / 0.14)
-                let mood = NailBotMood.forSession(
-                    self.presentation,
-                    visualState: self.visualState,
-                    isSpeaking: self.isSpeaking,
-                    isActivelyListening: self.isActivelyListening,
-                    hasNotesError: !self.notulenError.isEmpty
-                )
-                let frame = MeetAvatarFrame(
-                    mood: mood,
-                    phase: phase,
-                    speakingEnergy: mood == .speaking ? self.avatarSpeech.energy(at: time) : 0,
-                    listeningEnergy: mood == .listening ? 0.7 : 0,
-                    pose: .init(blinkScaleY: blinkScale, glanceX: 0)
-                )
-                guard let jpeg = MeetAvatarRenderer.renderJPEG(frame) else {
-                    self.failMeetingAvatar()
-                    return
+                let tickStarted: TimeInterval
+                let interval: TimeInterval
+                let imageToEncode: CGImage?
+                let keyToSend: MeetAvatarFrameKey?
+                let cachedJPEG: Data?
+
+                do {
+                    guard let self, self.avatarRequest.enabled, self.avatarRequest.revision == revision else { return }
+                    tickStarted = ProcessInfo.processInfo.systemUptime
+                    let phase = tickStarted - started
+                    let blinkScale = MeetAvatarRenderPolicy.blinkScale(forPhase: phase)
+                    let mood = NailBotMood.forSession(
+                        self.presentation,
+                        visualState: self.visualState,
+                        isSpeaking: self.isSpeaking,
+                        isActivelyListening: self.isActivelyListening,
+                        hasNotesError: !self.notulenError.isEmpty
+                    )
+                    interval = MeetAvatarRenderPolicy.frameInterval(for: mood, blinkScale: blinkScale)
+
+                    let frame = MeetAvatarFrame(
+                        mood: mood,
+                        phase: phase,
+                        speakingEnergy: mood == .speaking ? self.avatarSpeech.energy(at: tickStarted) : 0,
+                        listeningEnergy: mood == .listening ? 0.7 : 0,
+                        pose: .init(blinkScaleY: blinkScale, glanceX: 0)
+                    )
+                    let key = frame.renderKey
+
+                    if !self.avatarTransport.hasInflightFrame, key != lastSentKey {
+                        keyToSend = key
+                        if let cached = staticJPEGCache[key] {
+                            cachedJPEG = cached
+                            imageToEncode = nil
+                        } else {
+                            cachedJPEG = nil
+                            guard let image = MeetAvatarRenderer.renderCGImage(frame) else {
+                                self.failMeetingAvatar()
+                                return
+                            }
+                            imageToEncode = image
+                        }
+                    } else {
+                        keyToSend = nil
+                        cachedJPEG = nil
+                        imageToEncode = nil
+                    }
                 }
-                self.avatarTransport.offer(revision: revision, jpeg: jpeg)
-                let remaining = max(0.001, 0.05 - (ProcessInfo.processInfo.systemUptime - time))
+
+                if let keyToSend {
+                    let encoded: Data?
+                    if let cachedJPEG {
+                        encoded = cachedJPEG
+                    } else if let imageToEncode {
+                        encoded = await Task.detached(priority: .userInitiated) {
+                            MeetAvatarRenderer.encodeJPEG(imageToEncode)
+                        }.value
+                    } else {
+                        encoded = nil
+                    }
+
+                    guard !Task.isCancelled,
+                          let self,
+                          self.avatarRequest.enabled,
+                          self.avatarRequest.revision == revision else { return }
+                    guard let jpeg = encoded else {
+                        self.failMeetingAvatar()
+                        return
+                    }
+                    if keyToSend.isCacheableStaticPose, staticJPEGCache[keyToSend] == nil {
+                        if staticJPEGCache.count >= 4 {
+                            staticJPEGCache.removeAll(keepingCapacity: true)
+                        }
+                        staticJPEGCache[keyToSend] = jpeg
+                    }
+                    self.avatarTransport.offer(revision: revision, jpeg: jpeg)
+                    lastSentKey = keyToSend
+                }
+
+                let remaining = max(0.005, interval - (ProcessInfo.processInfo.systemUptime - tickStarted))
                 try? await Task.sleep(for: .seconds(remaining))
             }
         }

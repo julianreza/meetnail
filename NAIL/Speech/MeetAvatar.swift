@@ -1,19 +1,117 @@
 import AppKit
 import Foundation
+import ImageIO
 import Network
 import SwiftUI
+import UniformTypeIdentifiers
 
-struct NailBotFacePose {
+struct NailBotFacePose: Equatable, Sendable {
     var blinkScaleY: CGFloat
     var glanceX: CGFloat
 }
 
-struct MeetAvatarFrame {
+struct MeetAvatarFrame: Sendable {
     var mood: NailBotMood
     var phase: Double
     var speakingEnergy: Double
     var listeningEnergy: Double
     var pose: NailBotFacePose
+}
+
+struct MeetAvatarFrameKey: Hashable, Sendable {
+    let mood: NailBotMood
+    let phaseBucket: Int
+    let speakingBucket: Int
+    let listeningBucket: Int
+    let blinkBucket: Int
+    let glanceBucket: Int
+
+    var isCacheableStaticPose: Bool {
+        switch mood {
+        case .interrupted:
+            return true
+        case .standby, .error:
+            return blinkBucket == 200 && glanceBucket == 0
+        case .listening, .processing, .speaking:
+            return false
+        }
+    }
+}
+
+extension MeetAvatarFrame {
+    var renderKey: MeetAvatarFrameKey {
+        let blinkBucket = Int((pose.blinkScaleY * 200).rounded())
+        let glanceBucket = Int((pose.glanceX * 100).rounded())
+        switch mood {
+        case .interrupted:
+            return MeetAvatarFrameKey(
+                mood: .interrupted,
+                phaseBucket: 0,
+                speakingBucket: 0,
+                listeningBucket: 0,
+                blinkBucket: 200,
+                glanceBucket: 0
+            )
+        case .standby, .error:
+            return MeetAvatarFrameKey(
+                mood: mood,
+                phaseBucket: 0,
+                speakingBucket: 0,
+                listeningBucket: 0,
+                blinkBucket: blinkBucket,
+                glanceBucket: glanceBucket
+            )
+        case .listening:
+            return MeetAvatarFrameKey(
+                mood: .listening,
+                phaseBucket: Int((phase * 1000).rounded()),
+                speakingBucket: 0,
+                listeningBucket: Int((listeningEnergy * 200).rounded()),
+                blinkBucket: blinkBucket,
+                glanceBucket: glanceBucket
+            )
+        case .processing:
+            return MeetAvatarFrameKey(
+                mood: .processing,
+                phaseBucket: Int((phase * 1000).rounded()),
+                speakingBucket: 0,
+                listeningBucket: 0,
+                blinkBucket: blinkBucket,
+                glanceBucket: glanceBucket
+            )
+        case .speaking:
+            return MeetAvatarFrameKey(
+                mood: .speaking,
+                phaseBucket: Int((phase * 1000).rounded()),
+                speakingBucket: Int((speakingEnergy * 200).rounded()),
+                listeningBucket: 0,
+                blinkBucket: blinkBucket,
+                glanceBucket: glanceBucket
+            )
+        }
+    }
+}
+
+enum MeetAvatarRenderPolicy {
+    static func blinkScale(forPhase phase: Double) -> CGFloat {
+        let blink = phase.truncatingRemainder(dividingBy: 3.8)
+        return 1 - 0.86 * max(0, 1 - abs(blink - 3.45) / 0.14)
+    }
+
+    static func frameInterval(for mood: NailBotMood, blinkScale: CGFloat) -> TimeInterval {
+        switch mood {
+        case .speaking:
+            return 0.05
+        case .processing:
+            return 0.083
+        case .listening:
+            return blinkScale < 0.999 ? 0.05 : 0.10
+        case .standby, .error:
+            return blinkScale < 0.999 ? 0.05 : 0.06
+        case .interrupted:
+            return 0.08
+        }
+    }
 }
 
 extension NailBotMood {
@@ -32,10 +130,11 @@ extension NailBotMood {
     }
 }
 
-@MainActor
-enum MeetAvatarRenderer {
-    static func renderJPEG(_ frame: MeetAvatarFrame) -> Data? {
-        let content = ZStack {
+private struct MeetAvatarScene: View {
+    let frame: MeetAvatarFrame
+
+    var body: some View {
+        ZStack {
             Color(hex: 0x0A0A0A)
             NailBotFaceView(
                 mood: frame.mood,
@@ -47,24 +146,98 @@ enum MeetAvatarRenderer {
                 speechLevel: frame.speakingEnergy
             )
         }
-        .frame(width: 1280, height: 720)
-        let renderer = ImageRenderer(content: content)
-        renderer.scale = 1.0
-        renderer.isOpaque = true
+        .frame(width: MeetAvatarRenderer.faceBoxSize, height: MeetAvatarRenderer.faceBoxSize)
+        .clipped()
+    }
+}
+
+@MainActor
+enum MeetAvatarRenderer {
+    static let canvasWidth = 1280
+    static let canvasHeight = 720
+    fileprivate static let faceBoxSize: CGFloat = 640
+
+    private static let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+    private static let backgroundColor = CGColor(
+        colorSpace: colorSpace,
+        components: [10.0 / 255.0, 10.0 / 255.0, 10.0 / 255.0, 1.0]
+    )
+    private static var cachedContext: CGContext?
+    private static var cachedRenderer: ImageRenderer<MeetAvatarScene>?
+
+    private static func makeOrReuseContext() -> CGContext? {
+        if let cachedContext {
+            return cachedContext
+        }
         guard let context = CGContext(
             data: nil,
-            width: 1280,
-            height: 720,
+            width: canvasWidth,
+            height: canvasHeight,
             bitsPerComponent: 8,
-            bytesPerRow: 1280 * 4,
-            space: CGColorSpaceCreateDeviceRGB(),
+            bytesPerRow: canvasWidth * 4,
+            space: colorSpace,
             bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
         ) else { return nil }
+        if let backgroundColor {
+            context.setFillColor(backgroundColor)
+            context.fill(CGRect(x: 0, y: 0, width: canvasWidth, height: canvasHeight))
+        }
+        cachedContext = context
+        return context
+    }
+
+    static func resetCache() {
+        cachedContext = nil
+        cachedRenderer = nil
+    }
+
+    static func renderCGImage(_ frame: MeetAvatarFrame) -> CGImage? {
+        guard let context = makeOrReuseContext() else { return nil }
+        let scene = MeetAvatarScene(frame: frame)
+        let renderer: ImageRenderer<MeetAvatarScene>
+        if let cachedRenderer {
+            cachedRenderer.content = scene
+            renderer = cachedRenderer
+        } else {
+            let created = ImageRenderer(content: scene)
+            created.scale = 1.0
+            created.isOpaque = true
+            cachedRenderer = created
+            renderer = created
+        }
+
+        let originX = (CGFloat(canvasWidth) - faceBoxSize) * 0.5
+        let originY = (CGFloat(canvasHeight) - faceBoxSize) * 0.5
+        if let backgroundColor {
+            context.setFillColor(backgroundColor)
+            context.fill(CGRect(x: originX, y: originY, width: faceBoxSize, height: faceBoxSize))
+        }
+        context.saveGState()
+        context.translateBy(x: originX, y: originY)
         renderer.render { _, draw in
             draw(context)
         }
-        guard let image = context.makeImage() else { return nil }
-        return NSBitmapImageRep(cgImage: image).representation(using: .jpeg, properties: [.compressionFactor: 0.92])
+        context.restoreGState()
+        return context.makeImage()
+    }
+
+    nonisolated static func encodeJPEG(_ image: CGImage, quality: CGFloat = 0.92) -> Data? {
+        let data = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(
+            data,
+            UTType.jpeg.identifier as CFString,
+            1,
+            nil
+        ) else { return nil }
+        let options = [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary
+        CGImageDestinationAddImage(destination, image, options)
+        guard CGImageDestinationFinalize(destination) else { return nil }
+        return data as Data
+    }
+
+    static func renderJPEG(_ frame: MeetAvatarFrame) -> Data? {
+        guard let image = renderCGImage(frame) else { return nil }
+        return encodeJPEG(image)
     }
 }
 
@@ -123,6 +296,7 @@ final class MeetAvatarTransport {
     private var pending: Data?
     private var busy = false
     var onFailure: (() -> Void)?
+    var hasInflightFrame: Bool { busy || pending != nil }
 
     func connect(path: String) {
         guard connection == nil else { return }
@@ -145,7 +319,7 @@ final class MeetAvatarTransport {
 
     func offer(revision: UInt32, jpeg: Data) {
         guard !jpeg.isEmpty, jpeg.count <= 1_048_576 else { return }
-        var packet = Data()
+        var packet = Data(capacity: 8 + jpeg.count)
         for var field in [revision.bigEndian, UInt32(jpeg.count).bigEndian] {
             withUnsafeBytes(of: &field) { packet.append(contentsOf: $0) }
         }
