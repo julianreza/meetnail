@@ -393,8 +393,9 @@ function createMediaSandbox({
   }
 
   class FakeRTCPeerConnection extends EventEmitter {
-    constructor() {
+    constructor(config = null) {
       super();
+      this.config = config;
       this.connectionState = 'connected';
       this.iceConnectionState = 'connected';
       this.iceGatheringState = initialIceGatheringState;
@@ -676,15 +677,15 @@ test('meet-media.cjs codexWaitUserSpeech uses 40ms poll, 350ms default silence, 
   const sandbox = createMediaSandbox({
     sampleProvider: () => {
       frame++;
-      // Frames 1..3: speech (0.04); Frames 4+: silence (0.0003)
-      const val = frame <= 3 ? 0.04 : 0.0003;
+      // Frames 1..5: speech (0.04); Frames 6+: silence (0.0003)
+      const val = frame <= 5 ? 0.04 : 0.0003;
       return new Float32Array(256).fill(val);
     },
   });
 
   await sandbox.api.codexConnect();
   const startedAt = Date.now();
-  // Use default silenceMs (350ms -> 9 ticks at 40ms = ~360ms after 3 speech ticks = ~480ms total)
+  // Use default silenceMs (350ms -> 9 ticks at 40ms = ~360ms after 5 speech ticks = ~560ms total)
   const res = await sandbox.api.codexWaitUserSpeech(2000, 3000);
   const finishedAt = Date.now();
 
@@ -693,6 +694,86 @@ test('meet-media.cjs codexWaitUserSpeech uses 40ms poll, 350ms default silence, 
   assert.ok(res.speechEndedAtMs >= startedAt && res.speechEndedAtMs <= finishedAt);
   assert.ok(res.silenceWaitMs >= 280 && res.silenceWaitMs <= 650, `Expected silenceWaitMs ~350ms, got ${res.silenceWaitMs}ms`);
   assert.ok(finishedAt - startedAt < 850, `Expected 40ms poll + 350ms default silence to finish under 850ms, got ${finishedAt - startedAt}ms`);
+  sandbox.api.codexDisconnect();
+});
+
+test('meet-media.cjs codexWaitUserSpeech resets inGain to 0 after a brief 2-frame (~80ms) noise blip and continues waiting', async () => {
+  // 1) Brief 2-frame noise blip followed by silence: resets inGain to 0 and returns spoke: false after maxWaitMs
+  let frame = 0;
+  let gainDuringBlip = null;
+  let gainAfterBlipReset = null;
+  let sandbox = null;
+  sandbox = createMediaSandbox({
+    sampleProvider: () => {
+      frame++;
+      const inGain = sandbox?.createdGains[3];
+      if (frame === 3 && inGain) gainDuringBlip = inGain.gain.value;
+      if (frame === 7 && inGain) gainAfterBlipReset = inGain.gain.value;
+      // Frames 1..2: brief 80ms noise blip (0.04); Frames 3+: silence (0.0003)
+      const val = frame <= 2 ? 0.04 : 0.0003;
+      return new Float32Array(256).fill(val);
+    },
+  });
+
+  await sandbox.api.codexConnect();
+  const blipOnlyRes = await sandbox.api.codexWaitUserSpeech(420, 2000, 160);
+  assert.equal(gainDuringBlip, 1, 'Expected inGain to open during initial 2-frame onset');
+  assert.equal(gainAfterBlipReset, 0, 'Expected inGain to reset to 0 after 4 silent frames following <160ms blip');
+  assert.equal(blipOnlyRes.spoke, false, 'Expected brief 2-frame blip without subsequent speech to return spoke: false');
+
+  // 2) Brief 2-frame noise blip, 4+ silent ticks (resets inGain to 0), then >=160ms real speech (5 frames): succeeds with spoke: true
+  frame = 0;
+  gainAfterBlipReset = null;
+  const followSandbox = createMediaSandbox({
+    sampleProvider: () => {
+      frame++;
+      const inGain = followSandbox.createdGains[3];
+      if (frame === 7 && inGain) gainAfterBlipReset = inGain.gain.value;
+      // Frames 1..2: brief noise blip (0.04)
+      // Frames 3..7: 5 silent frames (0.0003) -> resets state at frame 6
+      // Frames 8..12: 5 frames of real speech (~200ms >= 160ms)
+      // Frames 13+: trailing silence
+      const isVoice = (frame >= 1 && frame <= 2) || (frame >= 8 && frame <= 12);
+      return new Float32Array(256).fill(isVoice ? 0.04 : 0.0003);
+    },
+  });
+
+  await followSandbox.api.codexConnect();
+  const speechAfterBlipRes = await followSandbox.api.codexWaitUserSpeech(2500, 3000, 160);
+  assert.equal(gainAfterBlipReset, 0, 'Expected inGain to reset to 0 between brief blip and real speech');
+  assert.equal(speechAfterBlipRes.spoke, true, 'Expected real speech (>=160ms) following a brief noise blip to succeed');
+  assert.equal(speechAfterBlipRes.aborted, false);
+
+  sandbox.api.codexDisconnect();
+  followSandbox.api.codexDisconnect();
+});
+
+test('meet-media.cjs codexConnect configures Cloudflare + Google STUN servers and finishes in ~250ms on STUN error after host candidate', async () => {
+  const sandbox = createMediaSandbox({
+    sampleProvider: () => new Float32Array(256).fill(0),
+    initialIceGatheringState: 'gathering',
+  });
+
+  const startedAt = Date.now();
+  const connectPromise = sandbox.api.codexConnect();
+  await new Promise(r => setTimeout(r, 10));
+  const codexPc = sandbox.createdPeers[sandbox.createdPeers.length - 1];
+  assert.ok(codexPc);
+  assert.deepEqual(JSON.parse(JSON.stringify(codexPc.config)), {
+    iceServers: [
+      {urls: 'stun:stun.cloudflare.com:3478'},
+      {urls: 'stun:stun.l.google.com:19302'},
+    ],
+  });
+
+  codexPc.onicecandidate?.({candidate: {candidate: 'candidate:1 1 UDP 2122260223 192.168.1.10 54321 typ host', type: 'host'}});
+  codexPc.onicecandidateerror?.({errorCode: 701, errorText: 'STUN binding timeout'});
+  const sdp = await connectPromise;
+  const elapsed = Date.now() - startedAt;
+
+  assert.ok(sdp.includes('m=audio'));
+  assert.ok(elapsed >= 200 && elapsed < 500, `Expected 250ms STUN error fallback timer (well under 1200ms hardTimer), got ${elapsed}ms`);
+  assert.equal(codexPc.onicecandidateerror, null, 'Expected finish() to clear pc.onicecandidateerror');
   sandbox.api.codexDisconnect();
 });
 

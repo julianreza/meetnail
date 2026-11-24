@@ -1480,7 +1480,7 @@ function installMedia(enableAvatar = false) {
       outDelay.connect(outGain);
       outGain.connect(micBus);
 
-      const pc = new Peer({iceServers: [{urls: 'stun:stun.l.google.com:19302'}]});
+      const pc = new Peer({iceServers: [{urls: 'stun:stun.cloudflare.com:3478'}, {urls: 'stun:stun.l.google.com:19302'}]});
       pc.addTrack(inDest.stream.getAudioTracks()[0]);
       const dc = pc.createDataChannel('oai-events');
       const bridge = {
@@ -1525,14 +1525,18 @@ function installMedia(enableAvatar = false) {
       await new Promise(resolve => {
         if (pc.iceGatheringState === 'complete') return resolve();
         let done = false;
+        let hasHostCandidate = false;
         let srflxTimer = null;
+        let stunErrorTimer = null;
         const finish = () => {
           if (done) return;
           done = true;
           clearTimeout(hardTimer);
           if (srflxTimer) clearTimeout(srflxTimer);
+          if (stunErrorTimer) clearTimeout(stunErrorTimer);
           pc.onicegatheringstatechange = null;
           pc.onicecandidate = null;
+          pc.onicecandidateerror = null;
           resolve();
         };
         const hardTimer = setTimeout(finish, 1200);
@@ -1540,8 +1544,16 @@ function installMedia(enableAvatar = false) {
         pc.onicecandidate = ev => {
           if (!ev.candidate) { finish(); return; }
           const cand = ev.candidate.candidate || '';
+          if (ev.candidate.type === 'host' || /\btyp host\b/.test(cand)) {
+            hasHostCandidate = true;
+          }
           if (!srflxTimer && (ev.candidate.type === 'srflx' || ev.candidate.type === 'relay' || /\btyp (srflx|relay)\b/.test(cand))) {
             srflxTimer = setTimeout(finish, 150);
+          }
+        };
+        pc.onicecandidateerror = () => {
+          if (!srflxTimer && !stunErrorTimer && hasHostCandidate) {
+            stunErrorTimer = setTimeout(finish, 250);
           }
         };
       });
@@ -1574,7 +1586,7 @@ function installMedia(enableAvatar = false) {
           clearInterval(poll);
           if (abortCodexSpeech === onAbort) abortCodexSpeech = null;
           try { bridge.inGain.gain.value = 0; } catch {}
-          const spoke = voicedTicks >= 2;
+          const spoke = voicedTicks >= 4;
           if (!spoke || aborted) {
             bridge.dcAcceptingTurn = false;
           }
@@ -1626,10 +1638,20 @@ function installMedia(enableAvatar = false) {
             onsetStreak = 0;
             if (!voiceStartedAt) {
               noiseFloor = Math.min(0.0038, Math.max(0.002, noiseFloor * 0.9 + rms * 0.1));
+            } else {
+              silentTicks++;
+              if (voicedTicks < 4 && silentTicks >= 4) {
+                voiceStartedAt = 0;
+                lastVoicedAt = 0;
+                voicedTicks = 0;
+                silentTicks = 0;
+                onsetStreak = 0;
+                try { bridge.inGain.gain.value = 0; } catch {}
+              }
             }
-            if (voiceStartedAt && ++silentTicks >= requiredSilentTicks) { cleanup(false); return; }
+            if (voiceStartedAt && voicedTicks >= 4 && silentTicks >= requiredSilentTicks) { cleanup(false); return; }
           }
-          if (voicedTicks >= 2 && silentTicks >= 2) {
+          if (voicedTicks >= 4 && silentTicks >= 2) {
             bridge.outMeter.getFloatTimeDomainData(bridge.outBuf);
             let outSum = 0;
             for (let i = 0; i < bridge.outBuf.length; i++) outSum += bridge.outBuf[i] * bridge.outBuf[i];
