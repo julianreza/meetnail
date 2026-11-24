@@ -82,11 +82,21 @@ test('rejects a missing or changed source and cancellation', async () => {
 test('OCR bridge sends one image and matches its response', async () => {
   const events = [];
   const bridge = createPresentationOCRBridge(event => events.push(event));
+  assert.equal(bridge.timeoutMs, 45_000);
   const result = bridge.recognize(Buffer.from('image'));
   const payload = JSON.parse(events[0].slice('presentation-ocr '.length));
   assert.equal(payload.image, Buffer.from('image').toString('base64'));
   bridge.receive({id: payload.id.toUpperCase(), text: 'Error 7249'});
   assert.equal(await result, 'Error 7249');
+});
+
+test('OCR bridge supports custom timeoutMs and rejects on timeout', async () => {
+  const events = [];
+  const bridge = createPresentationOCRBridge(event => events.push(event), {timeoutMs: 25});
+  assert.equal(bridge.timeoutMs, 25);
+  await assert.rejects(bridge.recognize(Buffer.from('image')), /presentation-ocr-timeout/);
+  const payload = JSON.parse(events[0].slice('presentation-ocr '.length));
+  assert.equal(bridge.receive({id: payload.id, text: 'too late'}), false);
 });
 
 test('OCR bridge cancels pending requests on interrupt', async () => {

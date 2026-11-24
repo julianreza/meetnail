@@ -13,6 +13,7 @@ const {
   createPresentationSlidePoller,
   executeCodexHandsFreeTurn,
   executeCodexTurnWithFollowUp,
+  inspectMeet,
 } = require('../NAIL/Resources/meet.cjs');
 
 test('resolveCodexWakeWhisperModel prefers base when cached and falls back otherwise', () => {
@@ -44,6 +45,15 @@ test('resolveCodexWakeWhisperModel prefers base when cached and falls back other
 
   assert.equal(resolveCodexWakeWhisperModel('small', () => true), 'base');
   assert.equal(resolveCodexWakeWhisperModel('medium', () => false), 'medium');
+  assert.equal(
+    resolveCodexWakeWhisperModel({
+      whisperModel: 'small',
+      codexWakeWhisperModel: 'small',
+      homeDir: '/Users/tester',
+      existsSync: () => true,
+    }),
+    'small'
+  );
 });
 
 test('createWakePriorityGate waits while wake check is in-flight and wakes on completion or timeout', async () => {
@@ -490,3 +500,421 @@ test('Teams unmuteAndVerifyMic uses 40ms poll delay, 100ms settle delay, and ski
   assert.match(teamsLogs[0], /^UNMUTE_OK /);
   assert.ok(!jsCalls.some(s => s.includes('micOutDiag')));
 });
+
+test('Notulen worker payload in recordCodexNotes includes mode: transcript for beam_size=5 accuracy', async () => {
+  const {PassThrough} = require('node:stream');
+  const {EventEmitter} = require('node:events');
+  const {mkdtemp, writeFile, rm} = require('node:fs/promises');
+  const source = readFileSync(join(__dirname, '../NAIL/Resources/meet.cjs'), 'utf8');
+  const start = source.indexOf('  async function recordCodexNotes() {');
+  const end = source.indexOf('  let activeWin = null;', start);
+
+  const stdinWrites = [];
+  const emittedNotes = [];
+  const emittedEvents = [];
+  let meetingJoined = true;
+  let takeCount = 0;
+
+  const fakeWorker = new EventEmitter();
+  fakeWorker.stdout = new PassThrough();
+  fakeWorker.stderr = new PassThrough();
+  fakeWorker.stdin = new EventEmitter();
+  fakeWorker.stdin.writable = true;
+  fakeWorker.stdin.write = chunk => {
+    const str = String(chunk).trim();
+    stdinWrites.push(JSON.parse(str));
+    queueMicrotask(() => {
+      fakeWorker.stdout.write(`${JSON.stringify({
+        entries: [{text: 'Selamat pagi tim engineering', start: 0, end: 2, speaker: 1}],
+        nextSpeaker: 2,
+      })}\n`);
+    });
+    return true;
+  };
+  fakeWorker.stdin.end = () => {};
+
+  const recordCodexNotes = vm.runInNewContext(`${source.slice(start, end)}; recordCodexNotes`, {
+    process,
+    Buffer,
+    Promise,
+    activeWc: {
+      async executeJavaScript(script) {
+        if (script.includes('notesStart')) return true;
+        if (script.includes('notesTake')) {
+          takeCount++;
+          if (takeCount === 1) {
+            return {
+              audio: Buffer.from('fake-audio').toString('base64'),
+              startedAtMs: 1700000000000,
+              captions: [],
+            };
+          }
+          meetingJoined = false;
+          return null;
+        }
+        if (script.includes('micDiag().remoteCount')) return 1;
+        if (script.includes('notesStop')) return null;
+        return null;
+      },
+    },
+    mkdtemp,
+    writeFile,
+    rm,
+    join,
+    tmpdir,
+    homedir: () => '/Users/tester',
+    runtimeConfig: {whisperModel: 'small'},
+    __dirname: join(__dirname, '../NAIL/Resources'),
+    nextNotesSpeaker: 1,
+    notesWorker: null,
+    notesFailed: false,
+    stopping: false,
+    get meetingJoined() { return meetingJoined; },
+    listeningMode: 'notulen',
+    spawn: () => {
+      queueMicrotask(() => {
+        fakeWorker.stdout.write(`${JSON.stringify({ready: true, speakerLabels: true})}\n`);
+      });
+      return fakeWorker;
+    },
+    createInterface: require('node:readline').createInterface,
+    emitNotes: entries => emittedNotes.push(entries),
+    emit: ev => emittedEvents.push(ev),
+    codexWakeGate: {waitIfBusy: async () => true},
+    attributeNotes: entries => entries,
+    delay: async () => {},
+    stopNotesWorker: () => {},
+  });
+
+  await recordCodexNotes();
+  assert.equal(stdinWrites.length, 1);
+  assert.equal(stdinWrites[0].mode, 'transcript');
+  assert.match(stdinWrites[0].audio, /\.webm$/);
+  assert.equal(emittedNotes.length, 1);
+});
+
+test('executeCodexTurnWithFollowUp records a completed follow-up turn even if isTurnRequested() flips true during that turn', async () => {
+  const events = [];
+  const latencyEntries = [];
+  const notesMemory = createMeetingNotesMemory();
+  let turnRequested = false;
+  let followUpCalls = 0;
+
+  const wc = {
+    isDestroyed: () => false,
+    async executeJavaScript() { return null; },
+  };
+
+  const codexSession = {
+    async runLiveTurn() {
+      followUpCalls++;
+      // User presses manual Tanya while follow-up speech reply is completing
+      turnRequested = true;
+      return {
+        heard: 'Follow-up terakhir sebelum manual turn',
+        reply: 'Jawaban follow-up tetap tercatat.',
+        heardAtMs: 3000,
+        replyAtMs: 3500,
+        latencyMs: 500,
+      };
+    },
+  };
+
+  await executeCodexTurnWithFollowUp({
+    wc,
+    read: async () => ({}),
+    click: async () => true,
+    codexSession,
+    unmuteAndVerifyMicFn: async (_wc, _read, _click, state) => {
+      state.restoreMute = true;
+      return true;
+    },
+    restoreMeetMuteFn: async () => {},
+    meetingNotes: notesMemory,
+    emit: ev => events.push(ev),
+    appendLatencyLogFn: entry => latencyEntries.push(buildLatencyLogEntry(entry)),
+    isTurnRequested: () => turnRequested,
+    platform: 'meet',
+    provider: 'codex',
+    mode: 'hands-free',
+    executeTurn: async () => ({
+      heard: 'Pertanyaan pertama',
+      reply: 'Jawaban pertama.',
+      heardAtMs: 1000,
+      replyAtMs: 1500,
+      latencyMs: 500,
+    }),
+  });
+
+  assert.equal(followUpCalls, 1);
+  const resultEvents = events.filter(e => e.startsWith('voice-result '));
+  assert.equal(resultEvents.length, 2);
+  assert.deepEqual(JSON.parse(resultEvents[1].slice('voice-result '.length)), {
+    heard: 'Follow-up terakhir sebelum manual turn',
+    reply: 'Jawaban follow-up tetap tercatat.',
+    heardAtMs: 3000,
+    replyAtMs: 3500,
+    latencyMs: 500,
+  });
+  assert.equal(latencyEntries.length, 2);
+  assert.equal(latencyEntries[1].mode, 'follow-up');
+  assert.equal(notesMemory.count(), 4);
+  // Should not emit voice-standby when exiting follow-up because a manual turn is requested
+  assert.ok(!events.includes('voice-standby'));
+});
+
+test('executeCodexHandsFreeTurn logs voice-no-audio diagnostics on primary manual noAudio', async () => {
+  const events = [];
+  const loggedErrors = [];
+  const wc = {
+    isDestroyed: () => false,
+    async executeJavaScript(script) {
+      if (script.includes('__nailDiagnostics')) return {tracks: 0};
+      return null;
+    },
+  };
+
+  await executeCodexTurnWithFollowUp({
+    wc,
+    read: async () => ({}),
+    click: async () => true,
+    codexSession: {},
+    emit: ev => events.push(ev),
+    logVoiceError: async err => { loggedErrors.push(err); },
+    mode: 'manual',
+    executeTurn: async () => ({noAudio: true}),
+  });
+
+  assert.equal(loggedErrors.length, 1);
+  assert.match(loggedErrors[0].message, /voice-no-audio \(manual\)/);
+  assert.equal(events.length, 1);
+  assert.match(events[0], /^voice-no-audio /);
+});
+
+test('executeCodexHandsFreeTurn backs off on rapid null capture and suppresses redundant voice-standby emissions right after errors', async () => {
+  const events = [];
+  const delays = [];
+  let nowMs = 10_000;
+  const standbyState = {inStandby: false, lastVoiceErrorAt: 0};
+
+  const wc = {
+    isDestroyed: () => false,
+    async executeJavaScript() {
+      // Rapid null capture (e.g., attachedTracks.size === 0, 10ms elapsed)
+      nowMs += 10;
+      return null;
+    },
+  };
+
+  // Cycle 1: enters standby, emits voice-standby once, backs off 500ms on rapid null capture
+  await executeCodexHandsFreeTurn({
+    wc,
+    read: async () => ({}),
+    click: async () => true,
+    codexSession: {},
+    checkCodexWake: async () => ({triggered: false}),
+    emit: ev => events.push(ev),
+    standbyState,
+    nowFn: () => nowMs,
+    delayFn: async ms => { delays.push(ms); nowMs += ms; },
+  });
+
+  assert.deepEqual(events, ['voice-standby']);
+  assert.deepEqual(delays, [500]);
+  assert.equal(standbyState.inStandby, true);
+
+  // Cycle 2: already in standby -> suppresses duplicate voice-standby, still backs off 500ms on rapid null capture
+  await executeCodexHandsFreeTurn({
+    wc,
+    read: async () => ({}),
+    click: async () => true,
+    codexSession: {},
+    checkCodexWake: async () => ({triggered: false}),
+    emit: ev => events.push(ev),
+    standbyState,
+    nowFn: () => nowMs,
+    delayFn: async ms => { delays.push(ms); nowMs += ms; },
+  });
+
+  assert.deepEqual(events, ['voice-standby']);
+  assert.deepEqual(delays, [500, 500]);
+
+  // Simulate a voice error just occurred 100ms ago: standby is cleared, but within 4s holdoff
+  standbyState.inStandby = false;
+  standbyState.lastVoiceErrorAt = nowMs - 100;
+
+  await executeCodexHandsFreeTurn({
+    wc,
+    read: async () => ({}),
+    click: async () => true,
+    codexSession: {},
+    checkCodexWake: async () => ({triggered: false}),
+    emit: ev => events.push(ev),
+    standbyState,
+    nowFn: () => nowMs,
+    delayFn: async ms => { delays.push(ms); nowMs += ms; },
+  });
+
+  // Must NOT emit voice-standby within 4s of voice error
+  assert.deepEqual(events, ['voice-standby']);
+  assert.equal(standbyState.inStandby, false);
+
+  // Advance clock past 4s error holdoff -> now emits voice-standby again
+  nowMs += 4500;
+  await executeCodexHandsFreeTurn({
+    wc,
+    read: async () => ({}),
+    click: async () => true,
+    codexSession: {},
+    checkCodexWake: async () => ({triggered: false}),
+    emit: ev => events.push(ev),
+    standbyState,
+    nowFn: () => nowMs,
+    delayFn: async ms => { delays.push(ms); nowMs += ms; },
+  });
+
+  assert.deepEqual(events, ['voice-standby', 'voice-standby']);
+  assert.equal(standbyState.inStandby, true);
+});
+
+test('Meet join loop accepts state.inCall && !joined even when submitted === false', async () => {
+  const source = readFileSync(join(__dirname, '../NAIL/Resources/meet.cjs'), 'utf8');
+  const start = source.indexOf('    if (platform === \'meet\') {');
+  const end = source.indexOf('    // Microsoft Teams guest join loop', start);
+
+  const emitted = [];
+  let readCount = 0;
+  let notesSynced = false;
+  let pollerStarted = false;
+  let connectedEnsured = false;
+
+  const runMeetLoop = vm.runInNewContext(`(async () => {\n${source.slice(start, end)}\n})`, {
+    platform: 'meet',
+    provider: 'codex',
+    stopping: false,
+    avatarSocketPath: null,
+    avatarUnmuted: false,
+    turnRequested: false,
+    codexHandsFree: false,
+    codexWakeFailed: false,
+    followUpUntil: 0,
+    meetingJoined: false,
+    wc: {
+      getURL: () => 'https://meet.google.com/abc-defg-hij',
+      executeJavaScript: async () => true,
+    },
+    validNavigation: () => true,
+    read: async () => {
+      readCount++;
+      // User manually clicked Join in browser window, so state.inCall is true while submitted is still false
+      if (readCount === 1) return {inCall: true, signedIn: true};
+      return {inCall: false, signedIn: true};
+    },
+    click: async () => false,
+    emit: ev => emitted.push(ev),
+    emitAvatarAudio: () => {},
+    syncCodexNotes: () => { notesSynced = true; },
+    slidePoller: {
+      start: () => { pollerStarted = true; },
+      stop: () => {},
+    },
+    codexSession: {
+      ensureConnected: async () => { connectedEnsured = true; },
+      dispose: async () => {},
+    },
+    voiceTurn: async () => {},
+    gracefulLeaveCall: async () => 'left',
+    delay: async () => {},
+  });
+
+  const outcome = await runMeetLoop();
+  assert.equal(outcome, 'left');
+  assert.ok(emitted.includes('joined'));
+  assert.equal(notesSynced, true);
+  assert.equal(pollerStarted, true);
+  assert.equal(connectedEnsured, true);
+});
+
+test('inspectMeet() dispatches mousemove safely when MouseEvent is available and works when unavailable', () => {
+  const dispatched = [];
+  const prevDocument = global.document;
+  const prevMouseEvent = global.MouseEvent;
+  const prevGetComputedStyle = global.getComputedStyle;
+  try {
+    global.MouseEvent = class FakeMouseEvent {
+      constructor(type, init) {
+        this.type = type;
+        this.init = init;
+      }
+    };
+    global.getComputedStyle = () => ({visibility: 'visible'});
+    global.document = {
+      body: {
+        innerText: '',
+        dispatchEvent: ev => dispatched.push(ev),
+      },
+      querySelectorAll: () => [],
+      getElementById: () => null,
+      elementFromPoint: () => null,
+    };
+
+    const res = inspectMeet();
+    assert.equal(dispatched.length, 1);
+    assert.equal(dispatched[0].type, 'mousemove');
+    assert.deepEqual(dispatched[0].init, {bubbles: true, clientX: 200, clientY: 200});
+    assert.equal(res.inCall, false);
+
+    // Also safe when MouseEvent is undefined
+    delete global.MouseEvent;
+    assert.doesNotThrow(() => inspectMeet());
+  } finally {
+    global.document = prevDocument;
+    global.MouseEvent = prevMouseEvent;
+    global.getComputedStyle = prevGetComputedStyle;
+  }
+});
+
+test('Google Meet unmuteAndVerifyMic retries click(after.unmute) once if sending() is still false after 300ms', async () => {
+  const source = readFileSync(join(__dirname, '../NAIL/Resources/meet.cjs'), 'utf8');
+  const start = source.indexOf('  async function unmuteAndVerifyMic(');
+  const end = source.indexOf('  async function restoreMeetMute(', start);
+
+  let clickCount = 0;
+  let sendingPolls = 0;
+  const unmuteBtn = {x: 100, y: 200, name: 'Turn on microphone'};
+
+  const unmuteAndVerifyMic = vm.runInNewContext(`${source.slice(start, end)}\n; unmuteAndVerifyMic`, {
+    platform: 'meet',
+    stopping: false,
+    turnInterrupted: false,
+    delay: async () => {},
+    appendTeamsLog: () => {},
+    saveNoMicDiag: async () => { assert.fail('Should not fail with saveNoMicDiag when retry succeeds'); },
+  });
+
+  const wc = {
+    async executeJavaScript(script) {
+      if (script.includes('__nailMedia.sending()')) {
+        sendingPolls++;
+        return clickCount >= 2 && sendingPolls >= 12;
+      }
+      return null;
+    },
+  };
+
+  const state = {restoreMute: false};
+  const ok = await unmuteAndVerifyMic(
+    wc,
+    async () => ({unmute: clickCount < 2 ? unmuteBtn : null, mute: null}),
+    async () => {
+      clickCount++;
+      return true;
+    },
+    state
+  );
+
+  assert.equal(ok, true);
+  assert.equal(clickCount, 2);
+  assert.equal(state.restoreMute, true);
+});
+

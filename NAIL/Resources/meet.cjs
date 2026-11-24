@@ -59,9 +59,10 @@ async function captureMeetPresentation(wc, signal) {
   return image.toPNG();
 }
 
-function createPresentationOCRBridge(emit) {
+function createPresentationOCRBridge(emit, {timeoutMs = 45_000} = {}) {
   const pending = new Map();
   return {
+    timeoutMs,
     recognize(image, signal) {
       if (signal?.aborted) return Promise.reject(new DOMException('Interrupted', 'AbortError'));
       return new Promise((resolve, reject) => {
@@ -74,7 +75,7 @@ function createPresentationOCRBridge(emit) {
           if (error) reject(error); else resolve(text);
         };
         const onAbort = () => finish(new DOMException('Interrupted', 'AbortError'));
-        const timer = setTimeout(() => finish(new Error('presentation-ocr-timeout')), 15000);
+        const timer = setTimeout(() => finish(new Error('presentation-ocr-timeout')), timeoutMs);
         pending.set(id, finish);
         signal?.addEventListener('abort', onAbort, {once: true});
         emit(`presentation-ocr ${JSON.stringify({id, image: image.toString('base64')})}`);
@@ -554,6 +555,9 @@ function meetAvatarCameraAction(state, enabled, clicked, resetRequested) {
 }
 
 function inspectMeet() {
+  if (typeof MouseEvent === 'function') {
+    document.body?.dispatchEvent(new MouseEvent('mousemove', {bubbles: true, clientX: 200, clientY: 200}));
+  }
   const label = element => (element.getAttribute('aria-labelledby') || '').split(/\s+/)
     .map(id => document.getElementById(id)?.textContent || '').join(' ').trim() ||
     (element.getAttribute('aria-label') || element.innerText || '').trim();
@@ -828,6 +832,9 @@ function resolveCodexWakeWhisperModel(configOrModel = {}, maybeOpts = {}) {
   const opts = isStringModel
     ? (typeof maybeOpts === 'function' ? {existsSync: maybeOpts} : (maybeOpts || {}))
     : (configOrModel || {});
+  if (typeof opts.codexWakeWhisperModel === 'string' && opts.codexWakeWhisperModel.trim()) {
+    return opts.codexWakeWhisperModel.trim();
+  }
   const configured = isStringModel ? configOrModel : opts.whisperModel;
   const checkExists = typeof opts.existsSync === 'function' ? opts.existsSync : existsSync;
   const baseDir = opts.baseCachePath || join(opts.homeDir || homedir(), '.cache/huggingface/hub/models--Systran--faster-whisper-base');
@@ -1092,6 +1099,21 @@ async function captureCodexHandsFreeWake(wc, work, {
   };
 }
 
+async function waitBackoffInterruptible(totalMs, {isStopped, signal, delayFn = delay} = {}) {
+  if (totalMs <= 0 || isStopped?.() || signal?.aborted) return;
+  if (delayFn !== delay) {
+    await delayFn(totalMs);
+    return;
+  }
+  const sliceMs = 50;
+  let remaining = totalMs;
+  while (remaining > 0 && !isStopped?.() && !signal?.aborted) {
+    const step = Math.min(sliceMs, remaining);
+    await delay(step, undefined, {signal}).catch(() => {});
+    remaining -= step;
+  }
+}
+
 async function executeCodexHandsFreeTurn({
   wc,
   read,
@@ -1105,6 +1127,17 @@ async function executeCodexHandsFreeTurn({
   isTurnInterrupted = () => false,
   setTurnInterrupted = () => {},
   isTurnRequested = () => false,
+  isInStandby = () => false,
+  setInStandby = () => {},
+  getLastVoiceErrorAt = () => 0,
+  lastVoiceErrorAt = 0,
+  alreadyInStandby = false,
+  standbyState = null,
+  standbyErrorHoldoffMs = 4000,
+  rapidNullThresholdMs = 200,
+  emptyCaptureBackoffMs = 500,
+  nowFn = Date.now,
+  delayFn = delay,
   platform = 'meet',
   presentationReadingEnabled = false,
   runCodexPresentationTurn,
@@ -1112,11 +1145,27 @@ async function executeCodexHandsFreeTurn({
   runCodexLiveTurn,
 } = {}) {
   setTurnInterrupted(false);
-  if (!isTurnRequested() && !isStopping()) emit('voice-standby');
+  const currentlyInStandby = Boolean(
+    alreadyInStandby ||
+    standbyState?.inStandby ||
+    isInStandby()
+  );
+  const recentErrorAt = Math.max(
+    Number(lastVoiceErrorAt) || 0,
+    Number(standbyState?.lastVoiceErrorAt) || 0,
+    Number(getLastVoiceErrorAt?.()) || 0
+  );
+  const withinErrorHoldoff = recentErrorAt > 0 && Math.max(0, nowFn() - recentErrorAt) < standbyErrorHoldoffMs;
+  if (!isTurnRequested() && !isStopping() && !currentlyInStandby && !withinErrorHoldoff) {
+    emit('voice-standby');
+    setInStandby(true);
+    if (standbyState && typeof standbyState === 'object') standbyState.inStandby = true;
+  }
   const work = await mkdtemp(join(tmpdir(), 'nail-wake-'));
   const wakeAbort = new AbortController();
   onActiveWakeAbort(wakeAbort);
   const isStopped = () => isStopping() || isTurnInterrupted() || isTurnRequested() || wakeAbort.signal.aborted;
+  const captureStartedAt = nowFn();
   let wake = null;
   let preTiming = null;
   try {
@@ -1128,6 +1177,14 @@ async function executeCodexHandsFreeTurn({
     });
     if (!captured) {
       await rm(work, {recursive: true, force: true}).catch(() => {});
+      const elapsedMs = Math.max(0, nowFn() - captureStartedAt);
+      if (!isStopped() && elapsedMs < rapidNullThresholdMs && emptyCaptureBackoffMs > 0) {
+        await waitBackoffInterruptible(emptyCaptureBackoffMs, {
+          isStopped,
+          signal: wakeAbort.signal,
+          delayFn,
+        });
+      }
       return;
     }
     const {wakePromise, workerStartedAt, preTimingBase} = captured;
@@ -1149,13 +1206,18 @@ async function executeCodexHandsFreeTurn({
     if (wake) {
       const whisperMs = Number.isFinite(wake.whisperMs)
         ? wake.whisperMs
-        : Math.max(0, Date.now() - workerStartedAt);
+        : Math.max(0, nowFn() - workerStartedAt);
       preTiming = {
         ...preTimingBase,
         whisperMs,
       };
     }
   } catch (error) {
+    setInStandby(false);
+    if (standbyState && typeof standbyState === 'object') {
+      standbyState.inStandby = false;
+      standbyState.lastVoiceErrorAt = nowFn();
+    }
     await logVoiceError(error);
     await rm(work, {recursive: true, force: true}).catch(() => {});
     return;
@@ -1164,6 +1226,8 @@ async function executeCodexHandsFreeTurn({
   }
 
   if (!wake?.triggered || isStopping() || isTurnInterrupted() || isTurnRequested()) return;
+  setInStandby(false);
+  if (standbyState && typeof standbyState === 'object') standbyState.inStandby = false;
   emit(`voice-wake ${JSON.stringify({heard: wake.prompt || wake.raw || 'Nail'})}`);
   if (wake.has_query && wake.prompt) {
     if (shouldReadPresentation(platform, presentationReadingEnabled, wake.prompt)) {
@@ -1262,6 +1326,7 @@ async function executeCodexTurnWithFollowUp({
     if (isStopping() || isTurnInterrupted() || turnAbort.signal.aborted || result?.aborted) return;
     if (result?.noAudio) {
       const diag = await wc?.executeJavaScript?.('window.__nailDiagnostics ?? null', true)?.catch?.(() => null);
+      await logVoiceError(new Error(`voice-no-audio (${mode}): ${JSON.stringify(diag ?? {})}`));
       emit(`voice-no-audio ${JSON.stringify(diag ?? {})}`);
       return;
     }
@@ -1278,11 +1343,16 @@ async function executeCodexTurnWithFollowUp({
           skipUnmute: true,
           keepFollowUpMic: true,
         });
-        if (isStopping() || isTurnInterrupted() || isTurnRequested() || turnAbort.signal.aborted ||
+        if (isStopping() || isTurnInterrupted() || turnAbort.signal.aborted ||
             followUpResult?.aborted || followUpResult?.noAudio) {
           break;
         }
-        await recordCompletedTurn(followUpResult, 'follow-up');
+        if (followUpResult?.reply || followUpResult?.heard) {
+          await recordCompletedTurn(followUpResult, 'follow-up');
+        }
+        if (isTurnRequested()) {
+          break;
+        }
       }
     } finally {
       await cleanupMicAndSenders();
@@ -1328,10 +1398,41 @@ if (process.versions.electron) {
   let avatarSpeaking = false;
   let avatarUnmuted = false;
   let avatarOn = false;
+  let inVoiceStandby = false;
+  let lastVoiceErrorAt = 0;
+  const isVoiceErrorEvent = event =>
+    typeof event === 'string' && (
+      event === 'voice-failed' ||
+      event === 'voice-no-mic' ||
+      event === 'voice-codex-wake-unavailable' ||
+      event.startsWith('voice-no-audio') ||
+      /^voice-codex-(quota|login|missing|timeout|error|connection|no-transcript)\b/.test(event)
+    );
+  const isVoiceActiveEvent = event =>
+    typeof event === 'string' && (
+      event === 'voice-recording' ||
+      event === 'voice-processing' ||
+      event === 'voice-sending' ||
+      event === 'voice-followup' ||
+      event === 'voice-interrupted' ||
+      event.startsWith('voice-wake ') ||
+      event.startsWith('voice-result ')
+    );
   const emitAvatarAudio = (rms, sending) => {
     if (avatarRevision && avatarOn) console.log(`avatar-audio ${JSON.stringify({revision: avatarRevision, turn: avatarTurn, rms, sending})}`);
   };
   const emit = event => {
+    if (event === 'voice-standby') {
+      if (inVoiceStandby || (lastVoiceErrorAt > 0 && Date.now() - lastVoiceErrorAt < 4000)) {
+        return;
+      }
+      inVoiceStandby = true;
+    } else if (isVoiceErrorEvent(event)) {
+      lastVoiceErrorAt = Date.now();
+      inVoiceStandby = false;
+    } else if (isVoiceActiveEvent(event)) {
+      inVoiceStandby = false;
+    }
     console.log(event);
     if (!avatarSocketPath) return;
     const transition = avatarSpeechTransition(event);
@@ -1650,7 +1751,7 @@ if (process.versions.electron) {
           return;
         }
         const response = nextLine();
-        worker.stdin.write(`${JSON.stringify({audio: path})}\n`);
+        worker.stdin.write(`${JSON.stringify({audio: path, mode: 'transcript'})}\n`);
         const result = JSON.parse(await response);
         if (result.error) throw new Error(result.error);
         if (Number.isSafeInteger(result.nextSpeaker)) nextNotesSpeaker = Math.max(nextNotesSpeaker, result.nextSpeaker);
@@ -1792,6 +1893,7 @@ if (process.versions.electron) {
       if (provider === 'codex') {
         activeCodexWakeAbort?.abort();
         activeWc?.executeJavaScript('window.__nailAbortRecord?.()').catch(() => {});
+        activeWc?.executeJavaScript('window.__nailMedia?.codexAbortSpeech?.()').catch(() => {});
       } else if (autoVoicePhase === 'processing' && autoVoiceAbort) {
         autoVoiceAbort.abort(new Error('manual-preempt'));
         agyClient?.recycle();
@@ -2092,12 +2194,25 @@ if (process.versions.electron) {
         return false;
       }
     }
-    const deadline = Date.now() + (platform === 'teams' ? 4500 : 2500);
+    const verifyStartedAt = Date.now();
+    const maxVerifyMs = platform === 'teams' ? 4500 : 2500;
+    const deadline = verifyStartedAt + maxVerifyMs;
+    let waitedMs = 0;
     let isSending = false;
-    while (!stopping && !turnInterrupted && !signal?.aborted && Date.now() < deadline) {
+    let retriedMeetClick = false;
+    while (!stopping && !turnInterrupted && !signal?.aborted && Date.now() < deadline && waitedMs < maxVerifyMs) {
       isSending = Boolean(await wc.executeJavaScript('__nailMedia.sending()'));
       if (isSending) break;
+      if (platform === 'meet' && unmute && !retriedMeetClick &&
+          (!state.restoreMute || Date.now() - verifyStartedAt >= 300 || waitedMs >= 300)) {
+        retriedMeetClick = true;
+        after = await read();
+        if (after?.unmute) {
+          state.restoreMute = (await click(after.unmute)) || state.restoreMute;
+        }
+      }
       await delay(30);
+      waitedMs += 30;
     }
     if (stopping || turnInterrupted || signal?.aborted) return false;
     if (isSending) {
@@ -2128,6 +2243,8 @@ if (process.versions.electron) {
   }
 
   async function logVoiceError(error) {
+    lastVoiceErrorAt = Date.now();
+    inVoiceStandby = false;
     try {
       const dir = join(require('node:os').homedir(), 'Library/Logs/Nail');
       mkdirSync(dir, {recursive: true});
@@ -2224,6 +2341,9 @@ if (process.versions.electron) {
       isTurnInterrupted: () => turnInterrupted,
       setTurnInterrupted: val => { turnInterrupted = val; },
       isTurnRequested: () => turnRequested,
+      isInStandby: () => inVoiceStandby,
+      setInStandby: val => { inVoiceStandby = Boolean(val); },
+      getLastVoiceErrorAt: () => lastVoiceErrorAt,
       platform,
       presentationReadingEnabled,
       runCodexPresentationTurn,
@@ -2283,6 +2403,7 @@ if (process.versions.electron) {
           const inbound = await wc.executeJavaScript('JSON.stringify(window.__nailInbound ?? null, null, 1)');
           await writeFile(join(dir, 'meet-view.txt'), `${JSON.stringify(diag)}\n\n${inbound}\n\nCONSOLE:\n${consoleLogs.join('\n')}\n\n${text}`);
         } catch {}
+        await logVoiceError(new Error(`voice-no-audio: ${JSON.stringify(diag ?? {})}`));
         emit(`voice-no-audio ${JSON.stringify(diag ?? {})}`);
         return;
       }
@@ -2349,7 +2470,11 @@ if (process.versions.electron) {
         if (result.heard) agySyncedNoteCursor = notesPayload.nextCursor;
         if (!result.reply) {
           if (isFollowUp && !manual) followUpUntil = 0;
-          if (manual) emit(`voice-no-audio ${JSON.stringify((await readDiag()) ?? {})}`);
+          if (manual) {
+            const diag = (await readDiag()) ?? {};
+            await logVoiceError(new Error(`voice-no-audio: ${JSON.stringify(diag)}`));
+            emit(`voice-no-audio ${JSON.stringify(diag)}`);
+          }
           return;
         }
         if ((await stat(output)).size > 2_000_000) throw new Error('Reply audio too large');
@@ -2418,7 +2543,11 @@ if (process.versions.electron) {
         }
         if (!result.reply) {
           if (isFollowUp && !manual) followUpUntil = 0;
-          if (manual) emit(`voice-no-audio ${JSON.stringify((await readDiag()) ?? {})}`);
+          if (manual) {
+            const diag = (await readDiag()) ?? {};
+            await logVoiceError(new Error(`voice-no-audio: ${JSON.stringify(diag)}`));
+            emit(`voice-no-audio ${JSON.stringify(diag)}`);
+          }
           return;
         }
         if ((await stat(output)).size > 2_000_000) throw new Error('Reply audio too large');
@@ -2785,7 +2914,8 @@ if (process.versions.electron) {
           submitted = true;
           deadline = Date.now() + 90_000;
           emit('submitted');
-        } else if (submitted && state.inCall && !joined) {
+        } else if (state.inCall && !joined) {
+          submitted = true;
           joined = true;
           meetingJoined = true;
           syncCodexNotes();
