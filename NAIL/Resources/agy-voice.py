@@ -52,7 +52,7 @@ STYLE_SYSTEMS = {
 SYSTEM = STYLE_SYSTEMS["casual"]
 WHISPER_HOTWORDS = "Nail"
 WAKE_PATTERN = re.compile(
-    r"(?:(?:halo|hei|hai|oke|ok|ya)\s+)?(?:\b(?:nail|nael|neil|nyle|nel|niel|nell|niall|nahir\w*|nayu)\b|alun\s*ayel)|(?:halo|hei|hai)\s+\b(?:mail|nil)\b",
+    r"(?:(?:halo|hei|hai|oke|ok|ya)\s+)?(?:\b(?:nail|nails|nael|neil|nyle|nel|niel|nell|niall|naila|nayla|nahir\w*|nayu)\b|alun\s*ayel)|(?:halo|hei|hai|oke|ok)\s+\b(?:mail|nil|naik|nabil)\b",
     re.IGNORECASE,
 )
 PHANTOM_EXACT_PHRASES = frozenset({
@@ -138,9 +138,15 @@ def extract_after_wake(text: str) -> str | None:
     return res["prompt"] if res["triggered"] else None
 
 
+def _ffmpeg_bin() -> str:
+    return shutil.which("ffmpeg") or (
+        "/opt/homebrew/bin/ffmpeg" if pathlib.Path("/opt/homebrew/bin/ffmpeg").exists() else "ffmpeg"
+    )
+
+
 def decode_pcm16k(source: pathlib.Path, *, allow_incomplete: bool = False) -> np.ndarray:
     pcm = subprocess.run(
-        ["ffmpeg", "-nostdin", "-v", "error", "-i", str(source), "-ac", "1", "-ar", "16000", "-f", "s16le", "-"],
+        [_ffmpeg_bin(), "-nostdin", "-v", "error", "-i", str(source), "-ac", "1", "-ar", "16000", "-f", "s16le", "-"],
         check=not allow_incomplete,
         stdout=subprocess.PIPE,
         timeout=15.0,
@@ -700,12 +706,6 @@ def get_elevenlabs_api_key() -> str:
         return (res.stdout or "").strip()
     except Exception:
         return ""
-
-
-def _ffmpeg_bin() -> str:
-    return shutil.which("ffmpeg") or (
-        "/opt/homebrew/bin/ffmpeg" if pathlib.Path("/opt/homebrew/bin/ffmpeg").exists() else "ffmpeg"
-    )
 
 
 def _convert_mp3_to_wav(tmp_mp3: pathlib.Path, out_wav: pathlib.Path) -> None:

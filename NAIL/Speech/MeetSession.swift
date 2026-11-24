@@ -9,7 +9,12 @@ enum PresentationOCR {
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = true
         let handler = VNImageRequestHandler(data: image)
-        try handler.perform([request])
+        do {
+            try handler.perform([request])
+        } catch {
+            request.usesCPUOnly = true
+            try handler.perform([request])
+        }
         return (request.results ?? [])
             .compactMap { $0.topCandidates(1).first?.string }
             .joined(separator: "\n")
@@ -167,6 +172,7 @@ final class MeetSession {
     private(set) var browserWindowVisible = false
     private(set) var status = ""
     private(set) var visualState: SessionVisualState = .idle
+    private var lastErrorAt: Date?
     private var presentationPhase: SessionPresentation = .ready
     var presentation: SessionPresentation {
         if visualState == .error { return .error }
@@ -215,6 +221,15 @@ final class MeetSession {
     @ObservationIgnored private var avatarRender: Task<Void, Never>?
     @ObservationIgnored private var avatarSpeech = AvatarSpeechEnvelope()
     @ObservationIgnored private var avatarLastTurn: UInt64 = 0
+
+    nonisolated static func shouldPreserveErrorStatus(
+        visualState: SessionVisualState,
+        lastErrorAt: Date?,
+        now: Date = Date()
+    ) -> Bool {
+        guard visualState == .error, let lastErrorAt else { return false }
+        return now.timeIntervalSince(lastErrorAt) < 4.0
+    }
 
     nonisolated static func shouldMarkNotulenInterrupted(
         leaveRequested: Bool,
@@ -277,7 +292,8 @@ final class MeetSession {
         do {
             try input.write(contentsOf: Data("voice-turn\n".utf8))
             voiceBusy = true
-            visualState = .active
+            lastErrorAt = nil
+        visualState = .active
             status = "Menyimak audio Meet sekarang…"
         } catch {
             visualState = .error
@@ -474,6 +490,7 @@ final class MeetSession {
             .appendingPathComponent("Library/Application Support/Nail/Meet Chromium")
         let process = Process()
         let pipe = Pipe()
+        let stderrPipe = Pipe()
         let commands = Pipe()
         process.executableURL = runtime
 
@@ -511,7 +528,7 @@ final class MeetSession {
         process.arguments = args
         process.standardInput = commands
         process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
+        process.standardError = stderrPipe
 
         do {
             try process.run()
@@ -547,12 +564,39 @@ final class MeetSession {
             sessionStartedAt = nil
             currentNotulenURL = nil
         }
+        lastErrorAt = nil
         visualState = .active
         status = joiningMeeting
             ? (activePlatform == .microsoftTeams ? "Membuka Microsoft Teams (tamu)…" : "Membuka Google Meet…")
             : "Membuka login Google…"
         if joiningMeeting {
             HUDPanel.shared.show()
+        }
+
+        let stderrReader = stderrPipe.fileHandleForReading
+        Task.detached {
+            let maxLogBytes = 256 * 1024
+            var written = 0
+            let logsDir = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Logs/Nail", isDirectory: true)
+            try? FileManager.default.createDirectory(at: logsDir, withIntermediateDirectories: true)
+            let logURL = logsDir.appendingPathComponent("electron-stderr.log")
+            FileManager.default.createFile(atPath: logURL.path, contents: nil)
+            let logHandle = try? FileHandle(forWritingTo: logURL)
+            defer {
+                try? stderrReader.close()
+                try? logHandle?.close()
+            }
+            while true {
+                let data = stderrReader.availableData
+                if data.isEmpty { break }
+                if let logHandle, written < maxLogBytes {
+                    let remaining = maxLogBytes - written
+                    let chunk = data.count <= remaining ? data : data.prefix(remaining)
+                    try? logHandle.write(contentsOf: chunk)
+                    written += chunk.count
+                }
+            }
         }
 
         let reader = pipe.fileHandleForReading
@@ -628,23 +672,28 @@ final class MeetSession {
         }
         switch event {
         case "login-panel":
-            visualState = .active
+            lastErrorAt = nil
+        visualState = .active
             status = "Selesaikan login di panel Nail."
         case "browser-window shown":
             browserWindowVisible = true
         case "browser-window hidden":
             browserWindowVisible = false
         case "submitted":
-            visualState = .active
+            lastErrorAt = nil
+        visualState = .active
             status = "Menunggu konfirmasi \(activePlatform?.label ?? "rapat")…"
         case "teams-launcher":
-            visualState = .active
+            lastErrorAt = nil
+        visualState = .active
             status = "Memilih 'Continue on this browser' di Teams…"
         case "teams-prejoin":
-            visualState = .active
+            lastErrorAt = nil
+        visualState = .active
             status = "Mengisi nama 'Nail' di lobi Teams…"
         case "waiting":
-            visualState = .active
+            lastErrorAt = nil
+        visualState = .active
             status = "Menunggu host mengizinkan Nail."
         case "joined":
             voiceReady = activeProvider != nil && input != nil
@@ -676,16 +725,19 @@ final class MeetSession {
             status = "Jendela lanjutan aktif (langsung bicara tanpa 'Nail')…"
         case "voice-recording":
             voiceBusy = true
-            visualState = .active
+            lastErrorAt = nil
+        visualState = .active
             status = "Menyimak audio Meet (maks 8 detik)…"
         case "voice-processing":
             voiceBusy = true
-            visualState = .active
+            lastErrorAt = nil
+        visualState = .active
             status = "Memproses audio dan menyiapkan jawaban…"
         case "voice-sending":
             voiceBusy = true
             isSpeaking = true
-            visualState = .active
+            lastErrorAt = nil
+        visualState = .active
             status = "Mengirim suara Nail ke Meet…"
         case "voice-interrupted":
             avatarSpeech.stop(throughTurn: avatarLastTurn)
@@ -695,16 +747,20 @@ final class MeetSession {
             visualState = .interrupted
             status = "Suara Nail dipotong (Panic Mute)."
         case "voice-codex-connecting":
-            visualState = .active
+            lastErrorAt = nil
+        visualState = .active
             status = "Menyambungkan suara ke Codex…"
         case "voice-codex-listening":
-            visualState = .active
+            lastErrorAt = nil
+        visualState = .active
             status = "Codex sedang memproses ucapan…"
         case "voice-codex-heard":
-            visualState = .active
+            lastErrorAt = nil
+        visualState = .active
             status = "Codex sudah menangkap ucapan. Menunggu jawabannya…"
         case "voice-codex-delegating":
-            visualState = .active
+            lastErrorAt = nil
+        visualState = .active
             status = "Codex sedang menyiapkan jawaban lengkap…"
         case "voice-no-mic":
             voiceBusy = false
@@ -774,7 +830,8 @@ final class MeetSession {
                 }
             } else if event.hasPrefix("voice-wake ") {
                 voiceBusy = true
-                visualState = .active
+                lastErrorAt = nil
+        visualState = .active
                 if let info = try? JSONDecoder().decode([String: String].self, from: Data(event.dropFirst(11).utf8)),
                    let heard = info["heard"], !heard.isEmpty {
                     voiceTranscript = heard

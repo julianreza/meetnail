@@ -11,6 +11,7 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -23,6 +24,10 @@ SPIKE = ROOT / ".build/debug/nail-spike"
 ASR = "https://api.deepseek.com/v1/tools/asr"
 CHAT = "https://api.deepseek.com/chat/completions"
 TTS = "https://api.deepseek.com/v1/tools/tts"
+NAIL_WAKE_PATTERN = re.compile(
+    r"\b(?:nail|nails|nael|neil|nyle|nel|niel|nell|niall|naila|nayla|nayu)\b",
+    re.IGNORECASE,
+)
 SYSTEM = (
     "Kamu Nail, temen deket yang lagi ngobrol santai, bukan asisten formal. Jawab maksimal dua kalimat "
     "Bahasa Indonesia obrolan sehari-hari yang super cair dan akrab (hindari kata kaku seperti saya, Anda, "
@@ -122,8 +127,13 @@ def run_turn(pid, seconds, api_key, work, speak_out, mic=False, source=None, req
     text = (asr.get("text") or "").strip()
     if not text:
         return {"rms": level, "heard": "", "skipped": True}
-    if require and require.casefold() not in text.casefold():
-        return {"rms": level, "heard": text, "skipped": True, "reason": f"tanpa frasa pemicu '{require}'"}
+    if require:
+        if require.casefold() == "nail":
+            wake_ok = bool(NAIL_WAKE_PATTERN.search(text))
+        else:
+            wake_ok = require.casefold() in text.casefold()
+        if not wake_ok:
+            return {"rms": level, "heard": text, "skipped": True, "reason": f"tanpa frasa pemicu '{require}'"}
     if transcribe_only:
         return {"heard": text, "asr_s": round(transcribed - recorded, 2)}
     reply = answer(text, api_key, notes_context=notes_context)

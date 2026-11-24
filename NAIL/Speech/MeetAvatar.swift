@@ -49,8 +49,21 @@ enum MeetAvatarRenderer {
         }
         .frame(width: 1280, height: 720)
         let renderer = ImageRenderer(content: content)
+        renderer.scale = 1.0
         renderer.isOpaque = true
-        guard let image = renderer.cgImage else { return nil }
+        guard let context = CGContext(
+            data: nil,
+            width: 1280,
+            height: 720,
+            bitsPerComponent: 8,
+            bytesPerRow: 1280 * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+        ) else { return nil }
+        renderer.render { _, draw in
+            draw(context)
+        }
+        guard let image = context.makeImage() else { return nil }
         return NSBitmapImageRep(cgImage: image).representation(using: .jpeg, properties: [.compressionFactor: 0.92])
     }
 }

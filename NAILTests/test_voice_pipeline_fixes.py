@@ -455,5 +455,108 @@ class TranscribeDaemonOptimizationTests(unittest.TestCase):
         nice_unused_mock.assert_not_called()
 
 
+class WakePatternAndFfmpegAndNailLoopTests(unittest.TestCase):
+    def test_expanded_wake_pattern_aliases_and_greeting_guards(self):
+        for should_trigger in [
+            "Nails, tolong cek jadwal.",
+            "Naila, bagaimana progresnya?",
+            "Halo Nayla, ada update?",
+            "Halo naik, tolong bantu.",
+            "Hei nabil, gimana hasilnya?",
+            "Hai naik, coba cek lagi.",
+            "Oke nabil, lanjutkan.",
+            "Ok naik, siap.",
+        ]:
+            res = pipeline.detect_wake_utterance(should_trigger)
+            self.assertTrue(res["triggered"], f"Expected wake trigger for: {should_trigger!r}")
+
+        for should_not_trigger in [
+            "Grafik penjualan naik terus bulan ini.",
+            "Ya naik sedikit sih.",
+            "Nabil baru saja masuk rapat.",
+            "Ya nabil, nanti kita bahas.",
+        ]:
+            res = pipeline.detect_wake_utterance(should_not_trigger)
+            self.assertFalse(res["triggered"], f"Unexpected wake trigger for: {should_not_trigger!r}")
+
+    def test_decode_pcm16k_uses_ffmpeg_bin(self):
+        fake_proc = types.SimpleNamespace(stdout=b"\x00\x00\x01\x00")
+        with patch.object(pipeline, "_ffmpeg_bin", return_value="/custom/bin/ffmpeg"), \
+             patch.object(pipeline.subprocess, "run", return_value=fake_proc) as run_mock:
+            samples = pipeline.decode_pcm16k(pathlib.Path("/tmp/sample.webm"))
+        self.assertEqual(len(samples), 2)
+        run_mock.assert_called_once()
+        cmd = run_mock.call_args.args[0]
+        self.assertEqual(cmd[0], "/custom/bin/ffmpeg")
+
+    def test_nail_loop_phonetic_wake_matching(self):
+        import tempfile
+
+        loop_path = pathlib.Path(__file__).resolve().parents[1] / "NAIL/Resources/nail-loop.py"
+        loop_spec = importlib.util.spec_from_file_location("nail_loop", loop_path)
+        nail_loop = importlib.util.module_from_spec(loop_spec)
+        loop_spec.loader.exec_module(nail_loop)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            work = pathlib.Path(tmpdir)
+            for heard in ["Halo Nayla, cek dulu", "Nails, gimana?", "Nael tolong jelaskan", "Nayu coba jawab"]:
+                with patch.object(nail_loop, "record", return_value=120), \
+                     patch.object(nail_loop, "answer", return_value="Siap."):
+                    out = nail_loop.run_turn(
+                        pid=1,
+                        seconds=1,
+                        api_key="k",
+                        work=work,
+                        speak_out=False,
+                        require="nail",
+                        transcript=heard,
+                    )
+                self.assertFalse(out.get("skipped", False), f"Expected wake match for: {heard!r}")
+                self.assertEqual(out["reply"], "Siap.")
+
+            with patch.object(nail_loop, "record", return_value=120), \
+                 patch.object(nail_loop, "answer") as answer_mock:
+                skipped = nail_loop.run_turn(
+                    pid=1,
+                    seconds=1,
+                    api_key="k",
+                    work=work,
+                    speak_out=False,
+                    require="nail",
+                    transcript="Pembahasan biasa tanpa nama.",
+                )
+                self.assertTrue(skipped["skipped"])
+                answer_mock.assert_not_called()
+
+            # Custom require word still uses literal substring matching
+            with patch.object(nail_loop, "record", return_value=120), \
+                 patch.object(nail_loop, "answer") as answer_mock:
+                custom_skip = nail_loop.run_turn(
+                    pid=1,
+                    seconds=1,
+                    api_key="k",
+                    work=work,
+                    speak_out=False,
+                    require="kunci",
+                    transcript="Halo Naila",
+                )
+                self.assertTrue(custom_skip["skipped"])
+                answer_mock.assert_not_called()
+
+            with patch.object(nail_loop, "record", return_value=120), \
+                 patch.object(nail_loop, "answer", return_value="Oke."):
+                custom_ok = nail_loop.run_turn(
+                    pid=1,
+                    seconds=1,
+                    api_key="k",
+                    work=work,
+                    speak_out=False,
+                    require="kunci",
+                    transcript="Kata KUNCI ditemukan.",
+                )
+                self.assertFalse(custom_ok.get("skipped", False))
+                self.assertEqual(custom_ok["reply"], "Oke.")
+
+
 if __name__ == "__main__":
     unittest.main()

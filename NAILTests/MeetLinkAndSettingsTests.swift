@@ -1141,6 +1141,38 @@ final class MeetLinkAndSettingsTests: XCTestCase {
         )
         XCTAssertNil(envCodex["ELEVENLABS_API_KEY"])
     }
+
+    func testVoiceStandbyPreservesRecentErrorStatusWithinFourSeconds() {
+        let now = Date()
+        XCTAssertTrue(
+            MeetSession.shouldPreserveErrorStatus(
+                visualState: .error,
+                lastErrorAt: now.addingTimeInterval(-1.5),
+                now: now
+            )
+        )
+        XCTAssertFalse(
+            MeetSession.shouldPreserveErrorStatus(
+                visualState: .error,
+                lastErrorAt: now.addingTimeInterval(-4.0),
+                now: now
+            )
+        )
+        XCTAssertFalse(
+            MeetSession.shouldPreserveErrorStatus(
+                visualState: .standby,
+                lastErrorAt: now.addingTimeInterval(-1.0),
+                now: now
+            )
+        )
+        XCTAssertFalse(
+            MeetSession.shouldPreserveErrorStatus(
+                visualState: .error,
+                lastErrorAt: nil,
+                now: now
+            )
+        )
+    }
 }
 
 private final class MockElevenLabsHandlerBox: @unchecked Sendable {
