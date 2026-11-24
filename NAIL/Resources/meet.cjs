@@ -1326,7 +1326,9 @@ async function executeCodexTurnWithFollowUp({
     muteRestored = true;
     await wc?.executeJavaScript?.('window.__nailMedia?.restoreTeamsSenders?.()', true)?.catch?.(() => {});
     if (restoreMeetMuteFn) {
-      await restoreMeetMuteFn(wc, read, click, micState.restoreMute);
+      try {
+        await restoreMeetMuteFn(wc, read, click, micState.restoreMute);
+      } catch {}
     }
   };
 
@@ -1368,7 +1370,11 @@ async function executeCodexTurnWithFollowUp({
       progress: emit,
       keepFollowUpMic: true,
     });
-    if (isStopping() || isTurnInterrupted() || turnAbort.signal.aborted || result?.aborted) return;
+    if (isStopping() || isTurnInterrupted() || turnAbort.signal.aborted) return;
+    if (result?.aborted) {
+      if (!isTurnRequested()) emit('voice-standby');
+      return;
+    }
     if (result?.noAudio) {
       const diag = await wc?.executeJavaScript?.('window.__nailDiagnostics ?? null', true)?.catch?.(() => null);
       await logVoiceError(new Error(`voice-no-audio (${mode}): ${JSON.stringify(diag ?? {})}`));
@@ -1398,12 +1404,11 @@ async function executeCodexTurnWithFollowUp({
           throw followErr;
         }
         if (isStopping() || isTurnInterrupted() || turnAbort.signal.aborted ||
-            followUpResult?.aborted || followUpResult?.noAudio) {
+            followUpResult?.aborted || followUpResult?.noAudio ||
+            !(followUpResult?.reply || followUpResult?.heard)) {
           break;
         }
-        if (followUpResult?.reply || followUpResult?.heard) {
-          await recordCompletedTurn(followUpResult, 'follow-up');
-        }
+        await recordCompletedTurn(followUpResult, 'follow-up');
         if (isTurnRequested()) {
           break;
         }
@@ -1416,7 +1421,12 @@ async function executeCodexTurnWithFollowUp({
     }
   } catch (error) {
     await cleanupMicAndSenders();
-    if (error?.message === 'voice-interrupted' || error?.name === 'AbortError' || isStopping() || isTurnInterrupted()) return;
+    if (error?.message === 'voice-interrupted' || error?.name === 'AbortError' || isStopping() || isTurnInterrupted()) {
+      if (!isStopping() && !isTurnInterrupted() && !isTurnRequested() && !turnAbort.signal.aborted) {
+        emit('voice-standby');
+      }
+      return;
+    }
     await logVoiceError(error);
     emit(error.message === 'voice-no-mic' || /^voice-codex-(quota|login|missing|timeout|error|connection|no-transcript)$/.test(error.message)
       ? error.message : 'voice-failed');
@@ -1469,6 +1479,7 @@ if (process.versions.electron) {
       event === 'voice-sending' ||
       event === 'voice-followup' ||
       event === 'voice-interrupted' ||
+      /^voice-codex-(connecting|listening|heard|delegating)$/.test(event) ||
       event.startsWith('voice-wake ') ||
       event.startsWith('voice-result ')
     );
@@ -1486,6 +1497,9 @@ if (process.versions.electron) {
       inVoiceStandby = false;
     } else if (isVoiceActiveEvent(event)) {
       inVoiceStandby = false;
+      if (event !== 'voice-interrupted') {
+        lastVoiceErrorAt = 0;
+      }
     }
     console.log(event);
     if (!avatarSocketPath) return;

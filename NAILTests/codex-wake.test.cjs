@@ -6,6 +6,7 @@ const vm = require('node:vm');
 const {createMeetingNotesMemory} = require('../NAIL/Resources/meet.cjs');
 const {
   CodexLiveSession,
+  createTurnState,
   INDONESIAN_PRONUNCIATION_GUIDE,
   STYLE_PROMPTS,
   resolveStylePrompt,
@@ -792,4 +793,152 @@ test('CodexLiveSession._startAppServer in non-vision mode disables enabled user 
       return true;
     }
   );
+});
+
+test('CodexLiveSession._awaitReplyTurn does not let spurious outRms or pre-outBase packet drift block noTranscriptTimeoutMs', async () => {
+  const session = new CodexLiveSession({noTranscriptTimeoutMs: 120, noReplyTimeoutMs: 280, turnTimeoutMs: 1200});
+  session.child = {};
+  session.threadId = 'thr_spurious_out';
+  session.webrtcConnected = true;
+  session.callRpc = async () => ({});
+
+  const progressEvents = [];
+  const wc = {
+    isDestroyed: () => false,
+    async executeJavaScript(script) {
+      if (script.includes('codexState')) {
+        return {
+          connected: true,
+          // Pre-outBase comfort-noise drift (+2 packets, +0.0005 energy) + continuous outRms > 0.004,
+          // but zero post-speech packets and no heard/reply transcript.
+          rxPackets: 102,
+          rxEnergy: 2.0005,
+          outRms: 0.01,
+          micRms: 0,
+          dcHeard: '',
+          dcReply: '',
+          dcReplyDone: false,
+          dcEvents: [],
+        };
+      }
+      return null;
+    },
+  };
+  session.activeWc = wc;
+
+  const state = createTurnState({rejectTurn: () => {}});
+  const startedAt = Date.now();
+  await assert.rejects(
+    () => session._awaitReplyTurn(wc, state, {
+      base: {connected: true, rxPackets: 100, rxEnergy: 2.0},
+      outBase: {connected: true, rxPackets: 102, rxEnergy: 2.0005},
+      speechEndedAt: startedAt,
+      interrupted: new Promise(() => {}),
+      progress: ev => progressEvents.push(ev),
+    }),
+    {message: 'voice-codex-no-transcript'}
+  );
+  const elapsedMs = Date.now() - startedAt;
+  assert.ok(elapsedMs < 600, `Expected noTranscriptTimeoutMs (~120ms), got ${elapsedMs}ms`);
+  assert.equal(state.outSpoke, false);
+  assert.equal(progressEvents.includes('voice-sending'), false);
+  assert.equal(session.webrtcConnected, false);
+});
+
+test('CodexLiveSession._awaitReplyTurn bounds stale outSpoke noise and stale delegationActive without waiting for turnTimeoutMs', async () => {
+  // 1) Continuous post-speech noise packets with outRms > 0.004 and empty heard/reply bounds at noReplyTimeoutMs
+  const noiseSession = new CodexLiveSession({noTranscriptTimeoutMs: 100, noReplyTimeoutMs: 240, turnTimeoutMs: 1200});
+  noiseSession.child = {};
+  noiseSession.threadId = 'thr_noise_out';
+  noiseSession.webrtcConnected = true;
+  noiseSession.callRpc = async () => ({});
+
+  let noisePackets = 50;
+  const noiseWc = {
+    isDestroyed: () => false,
+    async executeJavaScript(script) {
+      if (script.includes('codexState')) {
+        noisePackets += 1;
+        return {
+          connected: true,
+          rxPackets: noisePackets,
+          rxEnergy: 1.0,
+          outRms: 0.012,
+          micRms: 0,
+          dcHeard: '',
+          dcReply: '',
+          dcReplyDone: false,
+        };
+      }
+      return null;
+    },
+  };
+  noiseSession.activeWc = noiseWc;
+
+  const noiseStart = Date.now();
+  await assert.rejects(
+    () => noiseSession._awaitReplyTurn(noiseWc, createTurnState({rejectTurn: () => {}}), {
+      base: {connected: true, rxPackets: 50, rxEnergy: 1.0},
+      outBase: {connected: true, rxPackets: 50, rxEnergy: 1.0},
+      speechEndedAt: noiseStart,
+      interrupted: new Promise(() => {}),
+      progress: () => {},
+    }),
+    {message: 'voice-codex-no-transcript'}
+  );
+  const noiseElapsed = Date.now() - noiseStart;
+  assert.ok(noiseElapsed >= 220 && noiseElapsed < 700, `Expected bounded ~240ms timeout, got ${noiseElapsed}ms`);
+
+  // 2) Stale delegationActive with no transcript and no audio rejects at noTranscriptTimeoutMs
+  const delegSession = new CodexLiveSession({noTranscriptTimeoutMs: 120, noReplyTimeoutMs: 280, turnTimeoutMs: 1200});
+  delegSession.child = {};
+  delegSession.threadId = 'thr_stale_deleg';
+  delegSession.webrtcConnected = true;
+  delegSession.callRpc = async () => ({});
+  const idleWc = {
+    isDestroyed: () => false,
+    async executeJavaScript(script) {
+      if (script.includes('codexState')) {
+        return {connected: true, rxPackets: 10, rxEnergy: 0.1, outRms: 0, micRms: 0, dcHeard: '', dcReply: ''};
+      }
+      return null;
+    },
+  };
+  delegSession.activeWc = idleWc;
+
+  const delegNoHeardState = createTurnState({rejectTurn: () => {}});
+  delegNoHeardState.delegationActive = true;
+  const delegStart1 = Date.now();
+  await assert.rejects(
+    () => delegSession._awaitReplyTurn(idleWc, delegNoHeardState, {
+      base: {connected: true, rxPackets: 10, rxEnergy: 0.1},
+      outBase: {connected: true, rxPackets: 10, rxEnergy: 0.1},
+      speechEndedAt: delegStart1,
+      interrupted: new Promise(() => {}),
+      progress: () => {},
+    }),
+    {message: 'voice-codex-no-transcript'}
+  );
+  assert.ok(Date.now() - delegStart1 < 600);
+
+  // 3) Stale delegationActive WITH heard transcript but no reply rejects with voice-codex-timeout at noReplyTimeoutMs
+  delegSession.webrtcConnected = true;
+  const delegHeardState = createTurnState({rejectTurn: () => {}});
+  delegHeardState.delegationActive = true;
+  delegHeardState.heard = 'Tolong cek agenda rapat';
+  delegHeardState.heardParts = ['Tolong cek agenda rapat'];
+  const delegStart2 = Date.now();
+  await assert.rejects(
+    () => delegSession._awaitReplyTurn(idleWc, delegHeardState, {
+      base: {connected: true, rxPackets: 10, rxEnergy: 0.1},
+      outBase: {connected: true, rxPackets: 10, rxEnergy: 0.1},
+      speechEndedAt: delegStart2,
+      interrupted: new Promise(() => {}),
+      progress: () => {},
+      retryUnanswered: true,
+    }),
+    {message: 'voice-codex-timeout'}
+  );
+  const delegElapsed2 = Date.now() - delegStart2;
+  assert.ok(delegElapsed2 >= 240 && delegElapsed2 < 700, `Expected ~280ms noReplyTimeoutMs, got ${delegElapsed2}ms`);
 });

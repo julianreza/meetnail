@@ -1204,4 +1204,106 @@ test('executeCodexHandsFreeTurn logs wake diagnostics via appendWakeDiagLogFn an
   }
 });
 
+test('executeCodexTurnWithFollowUp restores voice-standby on empty follow-up, primary abort without turnRequested, and throwing restoreMeetMuteFn', async () => {
+  const wc = {
+    isDestroyed: () => false,
+    async executeJavaScript() { return null; },
+  };
+
+  // 1) Empty follow-up result ({heard: '', reply: ''}) breaks loop, cleans up, and emits voice-standby
+  const emptyEvents = [];
+  let followUpCalls = 0;
+  let restoreCalls = 0;
+  await executeCodexTurnWithFollowUp({
+    wc,
+    read: async () => ({}),
+    click: async () => true,
+    codexSession: {
+      async runLiveTurn() {
+        followUpCalls++;
+        return {heard: '', reply: ''};
+      },
+    },
+    unmuteAndVerifyMicFn: async (_wc, _read, _click, state) => {
+      state.restoreMute = true;
+      return true;
+    },
+    restoreMeetMuteFn: async () => {
+      restoreCalls++;
+      throw new Error('mute button disappeared');
+    },
+    emit: ev => emptyEvents.push(ev),
+    appendLatencyLogFn: () => {},
+    executeTurn: async opts => {
+      await opts.unmuteMeet();
+      return {heard: 'Halo', reply: 'Hai', heardAtMs: 100, replyAtMs: 200, latencyMs: 100};
+    },
+  });
+  assert.equal(followUpCalls, 1);
+  assert.equal(restoreCalls, 1);
+  assert.equal(emptyEvents[emptyEvents.length - 1], 'voice-standby');
+  assert.equal(emptyEvents.includes('voice-failed'), false);
+
+  // 2) Primary aborted without stopping/interrupted/turnRequested emits voice-standby
+  const abortedEvents = [];
+  await executeCodexTurnWithFollowUp({
+    wc,
+    read: async () => ({}),
+    click: async () => true,
+    codexSession: {},
+    emit: ev => abortedEvents.push(ev),
+    executeTurn: async () => ({aborted: true}),
+  });
+  assert.deepEqual(abortedEvents, ['voice-standby']);
+
+  // 3) Primary aborted WITH turnRequested=true does not flash voice-standby
+  const preemptedEvents = [];
+  await executeCodexTurnWithFollowUp({
+    wc,
+    read: async () => ({}),
+    click: async () => true,
+    codexSession: {},
+    emit: ev => preemptedEvents.push(ev),
+    isTurnRequested: () => true,
+    executeTurn: async () => ({aborted: true}),
+  });
+  assert.deepEqual(preemptedEvents, []);
+});
+
+test('meet.cjs emit clears lastVoiceErrorAt and inVoiceStandby on Codex active events so post-followup voice-standby is never suppressed', () => {
+  const source = readFileSync(join(__dirname, '../NAIL/Resources/meet.cjs'), 'utf8');
+  const start = source.indexOf('  let inVoiceStandby = false;');
+  const end = source.indexOf('  const closeAvatar =', start);
+  const emitted = [];
+  let fakeNow = 10_000;
+
+  const emit = vm.runInNewContext(
+    `(() => {\nconst Date = { now: () => fakeNow };\n${source.slice(start, end)}\nreturn emit;\n})()`,
+    {
+      avatarSocketPath: null,
+      avatarRevision: 0,
+      avatarOn: false,
+      avatarTurn: 0,
+      avatarSpeaking: false,
+      console: {log: ev => emitted.push(ev)},
+      get fakeNow() { return fakeNow; },
+    }
+  );
+
+  // Error starts 4s holdoff
+  emit('voice-no-audio {}');
+  // Idle standby within 4s is suppressed
+  fakeNow += 500;
+  emit('voice-standby');
+  assert.equal(emitted.includes('voice-standby'), false);
+
+  // New turn starts via voice-codex-listening (clears error holdoff & standby state)
+  fakeNow += 200;
+  emit('voice-codex-listening');
+  // Follow-up ends 500ms later (still < 4s from earlier error): voice-standby MUST be emitted
+  fakeNow += 500;
+  emit('voice-standby');
+  assert.equal(emitted[emitted.length - 1], 'voice-standby');
+});
+
 

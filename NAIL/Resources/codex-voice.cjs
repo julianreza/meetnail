@@ -819,11 +819,13 @@ class CodexLiveSession {
   async _awaitReplyTurn(wc, state, {base, outBase, speechEndedAt, signal, interrupted, progress, retryUnanswered = false}) {
     const startedAt = Date.now();
     const deadline = startedAt + this.turnTimeoutMs;
-    let prevEnergy = base.rxEnergy ?? outBase?.rxEnergy ?? 0;
+    const outBasePackets = outBase?.rxPackets ?? base.rxPackets ?? 0;
+    let prevEnergy = outBase?.rxEnergy ?? base.rxEnergy ?? 0;
     let firstAudioAt = 0;
     let lastAudioAt = 0;
     let maxOutRms = 0;
     let maxMicRms = 0;
+    let lastPoll = {};
 
     while (!signal?.aborted && Date.now() < deadline) {
       const poll = await Promise.race([
@@ -835,19 +837,25 @@ class CodexLiveSession {
         this._lastSyncedSlideText = '';
         throw new Error('voice-codex-connection');
       }
+      lastPoll = poll;
       maxOutRms = Math.max(maxOutRms, poll.outRms ?? 0);
       maxMicRms = Math.max(maxMicRms, poll.micRms ?? 0);
       const energyDelta = (poll.rxEnergy ?? 0) - prevEnergy;
       prevEnergy = poll.rxEnergy ?? prevEnergy;
       const packetsDelta = (poll.rxPackets ?? 0) - (base.rxPackets ?? 0);
+      const postSpeechPacketsDelta = (poll.rxPackets ?? 0) - outBasePackets;
       const totalEnergyDelta = (poll.rxEnergy ?? 0) - (base.rxEnergy ?? 0);
       const {heard: interimHeard, reply: interimReply} = CodexLiveSession.resolveTurnTexts(state, poll);
-      const fastFinishedReply = !state.outSpoke && packetsDelta > 0 && (
-        totalEnergyDelta > 0.00001 ||
-        (Boolean(poll.dcReplyDone) && Boolean(interimReply))
+      const fastFinishedReply = !state.outSpoke && packetsDelta > 0 && Boolean(interimReply) && (
+        Boolean(poll.dcReplyDone) ||
+        totalEnergyDelta > 0.00001
+      );
+      const hasPostSpeechAudio = postSpeechPacketsDelta > 0 && (
+        energyDelta > 0.00001 ||
+        (poll.outRms ?? 0) > 0.004
       );
 
-      if (energyDelta > 0.00001 || (poll.outRms ?? 0) > 0.004 || fastFinishedReply) {
+      if (hasPostSpeechAudio || fastFinishedReply) {
         const now = Date.now();
         if (!firstAudioAt) firstAudioAt = now;
         if (!state.outSpoke) progress('voice-sending');
@@ -890,7 +898,8 @@ class CodexLiveSession {
       }
 
       const elapsedMs = now - startedAt;
-      if (!state.outSpoke && !state.delegationActive) {
+      const hasRealOutAudio = Boolean(state.outSpoke && packetsDelta > 0);
+      if (!hasRealOutAudio && !state.delegationActive) {
         if (retryUnanswered && interimHeard && !interimReply && !poll.serverResponseInFlight &&
             !state.awaitingPostDelegation && elapsedMs >= Math.min(5000, this.noReplyTimeoutMs)) {
           const error = new Error('voice-codex-timeout');
@@ -906,12 +915,21 @@ class CodexLiveSession {
           await this.disconnectWebRTC(wc).catch(() => {});
           throw new Error(interimHeard ? 'voice-codex-timeout' : 'voice-codex-no-transcript');
         }
+      } else if (state.delegationActive && !interimReply && (
+        (!hasRealOutAudio && !interimHeard && elapsedMs >= this.noTranscriptTimeoutMs) ||
+        elapsedMs >= this.noReplyTimeoutMs
+      )) {
+        await this.disconnectWebRTC(wc).catch(() => {});
+        throw new Error(interimHeard ? 'voice-codex-timeout' : 'voice-codex-no-transcript');
+      } else if (!interimHeard && !interimReply && elapsedMs >= this.noReplyTimeoutMs) {
+        await this.disconnectWebRTC(wc).catch(() => {});
+        throw new Error('voice-codex-no-transcript');
       }
 
       await delay(60, undefined, {signal});
     }
     await this.disconnectWebRTC(wc).catch(() => {});
-    const {heard} = CodexLiveSession.resolveTurnTexts(state);
+    const {heard} = CodexLiveSession.resolveTurnTexts(state, lastPoll);
     throw new Error(heard ? 'voice-codex-timeout' : 'voice-codex-no-transcript');
   }
 
