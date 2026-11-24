@@ -278,3 +278,55 @@ test('CodexLiveSession.syncPresentationContext normalizes, caps at 3000 chars, d
   assert.equal(await session.syncPresentationContext('Target Q4: Pertumbuhan 35%'), true);
   assert.equal(rpcCalls.filter(c => c.method === 'thread/realtime/appendText').length, 3);
 });
+
+test('CodexLiveSession._doConnect rotates thread on retry and preserves voice-codex-error with stderr on async thread/realtime/error', async () => {
+  const rpcCalls = [];
+  const session = new CodexLiveSession();
+  session.child = {};
+  session.threadId = 'thr_initial_1';
+  session._recordStderrChunk('codex-stderr: backend transport warning\n');
+
+  let threadCount = 1;
+  session.callRpc = async (method, params) => {
+    rpcCalls.push({method, params});
+    if (method === 'thread/start') {
+      threadCount++;
+      return {thread: {id: `thr_rotated_${threadCount}`}};
+    }
+    if (method === 'thread/realtime/start') {
+      queueMicrotask(() => {
+        session.handleRpcLine(JSON.stringify({
+          method: 'thread/realtime/error',
+          params: {message: `Realtime session rejected on ${params.threadId}`},
+        }));
+      });
+    }
+    return {};
+  };
+
+  const wc = {
+    isDestroyed: () => false,
+    async executeJavaScript(script) {
+      if (script.includes('codexConnect')) return 'mock-sdp-offer';
+      if (script.includes('codexState')) return {connected: false, iceState: 'checking'};
+      return null;
+    },
+  };
+
+  await assert.rejects(
+    () => session._doConnect(wc),
+    err => {
+      assert.equal(err.message, 'voice-codex-error');
+      assert.match(err.stderr, /realtime-error: Realtime session rejected on thr_rotated_2/);
+      assert.match(err.stderr, /codex-stderr: backend transport warning/);
+      return true;
+    }
+  );
+
+  const realtimeStarts = rpcCalls.filter(c => c.method === 'thread/realtime/start');
+  assert.equal(realtimeStarts.length, 2);
+  assert.equal(realtimeStarts[0].params.threadId, 'thr_initial_1');
+  assert.equal(realtimeStarts[1].params.threadId, 'thr_rotated_2');
+  assert.equal(session._needsFreshThread, true);
+  assert.equal(session.webrtcConnected, false);
+});

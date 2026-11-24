@@ -617,5 +617,176 @@ test('CodexLiveSession.runLiveTurn supports custom wait/silence params, skipUnmu
     keepFollowUpMic: true,
   });
   assert.deepEqual(silentRes, {noAudio: true});
+  assert.equal(jsCalls.some(s => s.includes('codexOpenOut')), false);
   assert.ok(jsCalls.some(s => s.includes('codexCloseOut?.()')));
+});
+
+test('CodexLiveSession.callRpc rejects with voice-codex-timeout and cleans up pending timers on timeout, handleFailure, and dispose', async () => {
+  const session = new CodexLiveSession();
+  const written = [];
+  session.child = {
+    stdin: {
+      writable: true,
+      write(chunk) {
+        written.push(JSON.parse(chunk));
+      },
+    },
+  };
+
+  await assert.rejects(
+    () => session.callRpc('thread/start', {ephemeral: true}, {timeoutMs: 35}),
+    err => {
+      assert.equal(err.message, 'voice-codex-timeout');
+      assert.match(err.stderr, /rpc-timeout: thread\/start/);
+      return true;
+    }
+  );
+  assert.equal(session.pending.size, 0);
+
+  // Late response for timed-out request id is safely ignored
+  session.handleRpcLine(JSON.stringify({id: written[0].id, result: {thread: {id: 'late'}}}));
+  assert.equal(session.pending.size, 0);
+
+  // Fast resolve clears timer and removes pending entry
+  const pResolve = session.callRpc('getAuthStatus', {}, {timeoutMs: 5000});
+  const resolveId = written[written.length - 1].id;
+  assert.equal(session.pending.size, 1);
+  session.handleRpcLine(JSON.stringify({id: resolveId, result: {authMethod: 'chatgpt'}}));
+  assert.deepEqual(await pResolve, {authMethod: 'chatgpt'});
+  assert.equal(session.pending.size, 0);
+
+  // handleFailure clears pending timers and attaches stderr
+  session._recordStderrChunk('app-server fatal line\n');
+  const pFail = session.callRpc('thread/realtime/start', {}, {timeoutMs: 5000});
+  assert.equal(session.pending.size, 1);
+  session.handleFailure(new Error('voice-codex-error'));
+  await assert.rejects(() => pFail, err => {
+    assert.equal(err.message, 'voice-codex-error');
+    assert.match(err.stderr, /app-server fatal line/);
+    return true;
+  });
+  assert.equal(session.pending.size, 0);
+
+  // dispose clears any remaining pending timers
+  session.transportError = null;
+  const pDispose = session.callRpc('initialize', {}, {timeoutMs: 5000});
+  assert.equal(session.pending.size, 1);
+  await session.dispose();
+  await assert.rejects(() => pDispose, {message: 'voice-codex-error'});
+  assert.equal(session.pending.size, 0);
+});
+
+test('CodexLiveSession._startAppServer in non-vision mode disables enabled user MCP servers and captures bounded stderr on failure', async t => {
+  const {EventEmitter} = require('node:events');
+  const {PassThrough} = require('node:stream');
+
+  const spawnedCalls = [];
+  const makeFakeChild = onRequest => {
+    const child = new EventEmitter();
+    child.stdin = new PassThrough();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.killed = false;
+    child.kill = () => {
+      child.killed = true;
+    };
+    let buf = '';
+    child.stdin.on('data', chunk => {
+      buf += String(chunk);
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        onRequest(JSON.parse(line), child);
+      }
+    });
+    return child;
+  };
+
+  const session = new CodexLiveSession({
+    visionOnly: false,
+    spawnImpl: (cmd, args, opts) => {
+      const callIndex = spawnedCalls.length;
+      const child = makeFakeChild((msg, proc) => {
+        if (msg.method === 'initialize') {
+          proc.stdout.write(`${JSON.stringify({id: msg.id, result: {serverInfo: {name: 'codex'}}})}\n`);
+        } else if (msg.method === 'config/read') {
+          if (callIndex === 0) {
+            proc.stdout.write(`${JSON.stringify({
+              id: msg.id,
+              result: {
+                config: {
+                  mcp_servers: {
+                    mxterm: {enabled: true},
+                    node_repl: {},
+                    'bad.server.name': {enabled: true},
+                    disabled_srv: {enabled: false},
+                  },
+                },
+              },
+            })}\n`);
+          } else {
+            proc.stdout.write(`${JSON.stringify({
+              id: msg.id,
+              result: {
+                config: {
+                  mcp_servers: {
+                    mxterm: {enabled: false},
+                    node_repl: {enabled: false},
+                    disabled_srv: {enabled: false},
+                  },
+                },
+              },
+            })}\n`);
+          }
+        } else if (msg.method === 'getAuthStatus') {
+          proc.stdout.write(`${JSON.stringify({id: msg.id, result: {authMethod: 'chatgpt'}})}\n`);
+        } else if (msg.method === 'thread/start') {
+          proc.stdout.write(`${JSON.stringify({id: msg.id, result: {thread: {id: 'thr_nonvision_mcp'}}})}\n`);
+        }
+      });
+      spawnedCalls.push({cmd, args, opts, child});
+      return child;
+    },
+  });
+  t.after(() => session.dispose());
+
+  await session.warmup();
+  assert.equal(spawnedCalls.length, 2);
+  assert.deepEqual(spawnedCalls[0].opts.stdio, ['pipe', 'pipe', 'pipe']);
+  assert.equal(spawnedCalls[0].args.some(a => a.startsWith('mcp_servers.')), false);
+  assert.equal(spawnedCalls[0].child.killed, true);
+
+  assert.ok(spawnedCalls[1].args.includes('mcp_servers.mxterm.enabled=false'));
+  assert.ok(spawnedCalls[1].args.includes('mcp_servers.node_repl.enabled=false'));
+  assert.equal(spawnedCalls[1].args.some(a => a.includes('bad.server.name')), false);
+  assert.equal(session.threadId, 'thr_nonvision_mcp');
+
+  // Verify bounded stderr capture (last 20 lines, max 200 chars each) when startup fails
+  const failingSession = new CodexLiveSession({
+    visionOnly: false,
+    spawnImpl: () => makeFakeChild((msg, proc) => {
+      if (msg.method === 'initialize') {
+        for (let i = 1; i <= 25; i++) {
+          proc.stderr.write(`line-${i}-${'X'.repeat(230)}\n`);
+        }
+        proc.stdout.write(`${JSON.stringify({id: msg.id, error: {message: 'startup boom'}})}\n`);
+      }
+    }),
+  });
+  t.after(() => failingSession.dispose());
+
+  await assert.rejects(
+    () => failingSession.warmup(),
+    err => {
+      assert.equal(err.message, 'voice-codex-error');
+      assert.equal(typeof err.stderr, 'string');
+      const lines = err.stderr.split('\n');
+      assert.equal(lines.length, 20);
+      assert.ok(lines[0].startsWith('line-6-'));
+      assert.ok(lines[19].startsWith('line-25-'));
+      assert.ok(lines.every(l => l.length <= 200));
+      return true;
+    }
+  );
 });
