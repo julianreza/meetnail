@@ -97,6 +97,7 @@ function createTurnState({rejectTurn, onUserTranscript, onDelegationStarted}) {
     preview: {},
     rpcEvents: [],
     outSpoke: false,
+    replyDoneAt: 0,
     completed: false,
     delegationActive: false,
     awaitingPostDelegation: false,
@@ -797,11 +798,17 @@ class CodexLiveSession {
       : poll?.serverResponseInFlight
         ? 1800
         : 800;
+    const replyDoneStalled = Boolean(
+      poll?.dcReplyDone &&
+      reply.length > 0 &&
+      state.replyDoneAt > 0 &&
+      now - state.replyDoneAt >= 3000
+    );
     return Boolean(
       state.outSpoke &&
       packetsDelta > 0 &&
       (reply.length > 0 || now - lastAudioAt >= 2500) &&
-      now - lastAudioAt >= quietRequiredMs
+      (now - lastAudioAt >= quietRequiredMs || replyDoneStalled)
     );
   }
 
@@ -864,6 +871,9 @@ class CodexLiveSession {
         if (state.awaitingPostDelegation && !state.postDelegationSpoke && lastAudioAt > state.delegationDoneAt) {
           state.postDelegationSpoke = true;
         }
+      }
+      if (poll.dcReplyDone && !state.replyDoneAt) {
+        state.replyDoneAt = Date.now();
       }
       this.publishPreview(state, poll, progress);
 
@@ -942,6 +952,8 @@ class CodexLiveSession {
     silenceMs = 350,
     skipUnmute = false,
     keepFollowUpMic = false,
+    capturedAudio = null,
+    preTiming = null,
   } = {}) {
     if (signal?.aborted) throw signal.reason ?? new Error('voice-interrupted');
     this.clearIdleTimer();
@@ -998,7 +1010,20 @@ class CodexLiveSession {
           unmuteMs = skipUnmute ? 0 : Math.max(0, Date.now() - unmuteStartAt);
           return {__err: err};
         });
-      const capture = wc.executeJavaScript(`window.__nailMedia.codexWaitUserSpeech(${maxWaitMs}, ${maxSpeakMs}, ${silenceMs})`, true);
+      // A wake clip has already been captured locally. Replay its complete audio
+      // into the same WebRTC input used by live speech, without transcribing it.
+      const capture = capturedAudio
+        ? (async () => {
+            const micReady = await Promise.race([micReadyPromise, interrupted]);
+            if (micReady && typeof micReady === 'object' && micReady.__err) throw micReady.__err;
+            if (!micReady) throw new Error('voice-no-mic');
+            if (!outOpened) {
+              await wc.executeJavaScript('window.__nailMedia.codexOpenOut()', true);
+              outOpened = true;
+            }
+            return wc.executeJavaScript(`window.__nailMedia.codexPlayCapturedAudio(${JSON.stringify(capturedAudio.audioBase64)}, ${JSON.stringify(capturedAudio.format)})`, true);
+          })()
+        : wc.executeJavaScript(`window.__nailMedia.codexWaitUserSpeech(${maxWaitMs}, ${maxSpeakMs}, ${silenceMs})`, true);
       let capturing = true;
       let polling = false;
       const previewTimer = setInterval(async () => {
@@ -1026,15 +1051,17 @@ class CodexLiveSession {
         return {noAudio: true};
       }
       speechEndedAt = Date.now();
-      trueSpeechEndedAtMs = speech.speechEndedAtMs || speechEndedAt;
-      vadSilenceMs = speech.silenceWaitMs ?? Math.max(0, speechEndedAt - trueSpeechEndedAtMs);
+      trueSpeechEndedAtMs = preTiming?.trueSpeechEndedAtMs || speech.speechEndedAtMs || speechEndedAt;
+      vadSilenceMs = (capturedAudio && Number.isFinite(preTiming?.vadSilenceMs))
+        ? preTiming.vadSilenceMs
+        : (speech.silenceWaitMs ?? Math.max(0, speechEndedAt - trueSpeechEndedAtMs));
 
       progress('voice-codex-listening');
       const micReadyRes = await Promise.race([micReadyPromise, interrupted]);
       if (micReadyRes && typeof micReadyRes === 'object' && micReadyRes.__err) throw micReadyRes.__err;
       if (!micReadyRes) throw new Error('voice-no-mic');
 
-      const outBase = await wc.executeJavaScript('window.__nailMedia.codexState()', true);
+      const outBase = capturedAudio ? base : await wc.executeJavaScript('window.__nailMedia.codexState()', true);
       if (!outOpened) {
         await wc.executeJavaScript('window.__nailMedia.codexOpenOut()', true);
         outOpened = true;
@@ -1050,6 +1077,7 @@ class CodexLiveSession {
       return {
         ...replyResult,
         timing: {
+          ...(preTiming && typeof preTiming === 'object' ? preTiming : {}),
           vadSilenceMs,
           notesSyncMs,
           unmuteMs,
@@ -1095,6 +1123,13 @@ class CodexLiveSession {
       heardAtMs: speechEndedAt,
       latencyMs: Math.max(0, result.replyAtMs - speechEndedAt),
     };
+  }
+
+  async runCapturedTurn(wc, {audioBase64, format, ...options} = {}) {
+    if (typeof audioBase64 !== 'string' || !audioBase64 || audioBase64.length > 1_500_000 || !['pcm16k', 'webm'].includes(format)) {
+      throw new Error('voice-invalid-captured-audio');
+    }
+    return this.runLiveTurn(wc, {...options, capturedAudio: {audioBase64, format}});
   }
 
   async analyzeImage(path, question, signal) {

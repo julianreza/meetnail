@@ -294,6 +294,7 @@ struct MainWindowView: View {
     private func topBarNavTab(section: DesktopSection, palette: NailPalette) -> some View {
         let isSelected = selection == section
         let isHovered = hoveredSection == section
+        let activeTone = palette.activeContrastTone(for: .porcelain)
 
         return Button {
             selectSection(section)
@@ -310,7 +311,7 @@ struct MainWindowView: View {
                     .tracking(-0.12)
                     .foregroundStyle(
                         isSelected
-                            ? palette.primaryText(for: .obsidian)
+                            ? palette.primaryText(for: activeTone)
                             : (isHovered ? palette.primaryText(for: .porcelain) : palette.secondaryText(for: .porcelain))
                     )
                     .lineLimit(1)
@@ -321,7 +322,7 @@ struct MainWindowView: View {
             .frame(height: 28)
             .background {
                 if isSelected {
-                    NeuRaisedBackground(isCapsule: true, elevation: 0.65, tone: .obsidian)
+                    NeuRaisedBackground(isCapsule: true, elevation: 0.65, tone: activeTone)
                         .matchedGeometryEffect(id: "TopBarActiveSegment", in: sidebarNavNS)
                 } else if isHovered {
                     Capsule(style: .continuous)
@@ -354,10 +355,11 @@ struct MainWindowView: View {
             EmptyView()
         case .notulen:
             if !notulenFiles.isEmpty {
+                let activeTone = palette.activeContrastTone(for: .porcelain)
                 Text("\(notulenFiles.count)")
                     .font(.system(size: 10.5, weight: .semibold).monospacedDigit())
                     .contentTransition(.numericText())
-                    .foregroundStyle(palette.primaryText(for: isSelected ? .obsidian : .porcelain))
+                    .foregroundStyle(palette.primaryText(for: isSelected ? activeTone : .porcelain))
                     .padding(.horizontal, 6)
                     .frame(minWidth: 20)
                     .frame(height: 17)
@@ -366,7 +368,7 @@ struct MainWindowView: View {
                             NeuInsetBackground(
                                 isCapsule: true,
                                 depth: 0.45,
-                                tone: .obsidian
+                                tone: activeTone
                             )
                         } else {
                             NeuRaisedBackground(
@@ -846,6 +848,9 @@ struct MainWindowView: View {
                 size: dialSize,
                 isActive: isAcousticActive,
                 showYellowSpark: true,
+                mood: mood,
+                phase: phase,
+                energy: max(speakingEnergy, listeningEnergy),
                 tone: tone
             ) {
                 NailBotFaceView(
@@ -2215,6 +2220,7 @@ struct MainWindowView: View {
 
     private func transcriptSegmentedFilter(palette: NailPalette) -> some View {
         HStack(spacing: 2) {
+            let activeTone = palette.activeContrastTone(for: .porcelain)
             ForEach(TranscriptFeedFilter.allCases) { option in
                 let isSelected = feedFilter == option
 
@@ -2232,7 +2238,7 @@ struct MainWindowView: View {
                         .tracking(-0.12)
                         .foregroundStyle(
                             isSelected
-                                ? palette.primaryText(for: .obsidian)
+                                ? palette.primaryText(for: activeTone)
                                 : palette.secondaryText(for: .porcelain)
                         )
                         .lineLimit(1)
@@ -2240,7 +2246,7 @@ struct MainWindowView: View {
                         .frame(height: 24)
                         .background {
                             if isSelected {
-                                NeuRaisedBackground(isCapsule: true, elevation: 0.55, tone: .obsidian)
+                                NeuRaisedBackground(isCapsule: true, elevation: 0.55, tone: activeTone)
                                     .matchedGeometryEffect(id: "TranscriptFilterSegment", in: transcriptFilterNS)
                             }
                         }

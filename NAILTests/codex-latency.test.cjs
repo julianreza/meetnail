@@ -83,6 +83,22 @@ test('createWakePriorityGate waits while wake check is in-flight and wakes on co
   gate.leave();
 });
 
+test('hands-free sends the captured utterance to Codex as audio after local keyword detection', async () => {
+  const audioBase64 = Buffer.from([1, 2, 3, 4]).toString('base64');
+  let sent;
+  await executeCodexHandsFreeTurn({
+    wc: { executeJavaScript: async () => ({pcmBase64: audioBase64, durationMs: 1200}) },
+    codexSession: {prewarmConnection() {}},
+    checkCodexWake: async () => ({triggered: true}),
+    appendWakeDiagLogFn() {},
+    runCodexCapturedTurn: async (_wc, _read, _click, audio, options) => { sent = {audio, options}; },
+    runCodexLiveTurn: async () => assert.fail('must not discard the captured question'),
+    runCodexTextTurn: async () => assert.fail('must not send a Whisper transcript'),
+  });
+  assert.deepEqual(sent.audio, {audioBase64, format: 'pcm16k'});
+  assert.equal(sent.options.mode, 'hands-free');
+});
+
 test('manual Codex turn uses runCodexLiveTurn even when presentationReadingEnabled === true', async () => {
   const source = readFileSync(join(__dirname, '../NAIL/Resources/meet.cjs'), 'utf8');
   const start = source.indexOf('  async function voiceTurn(');

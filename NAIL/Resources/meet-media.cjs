@@ -278,6 +278,19 @@ function installMedia(enableAvatar = false) {
   let activePlayer = null;
   let activePlayDone = null;
   let lastPlayEndedAt = 0;
+  let playbackEpoch = 0;
+  let chunkQueueChain = Promise.resolve();
+  let chunkNextTime = 0;
+  let chunkTeamsAttached = false;
+  let chunkInFlightCount = 0;
+  const queuedPlayers = new Set();
+  const playbackIdleWaiters = new Set();
+  const notifyPlaybackIdle = () => {
+    if (queuedPlayers.size > 0 || chunkInFlightCount > 0) return;
+    const waiters = [...playbackIdleWaiters];
+    playbackIdleWaiters.clear();
+    for (const w of waiters) w();
+  };
   const activeRecordTrackAttach = new Set();
   const waitForLiveTrack = async (attachedTracks, attachRemoteTrack, idleWaitMs, setNotify) => {
     if (attachedTracks.size > 0) return true;
@@ -316,6 +329,7 @@ function installMedia(enableAvatar = false) {
     return btoa(binary);
   };
   let codexInBus = null;
+  let codexInputGeneration = 0;
   const codexBusSources = new Map();
   let codexBridge = null;
   let abortCodexSpeech = null;
@@ -618,6 +632,8 @@ function installMedia(enableAvatar = false) {
   };
   const cancelAndClearCodex = () => {
     if (!codexBridge) return;
+    codexInputGeneration++;
+    abortCodexSpeech?.();
     const b = codexBridge;
     try { b.inGain.gain.value = 0; } catch {}
     // Realtime v3 turn cleanup is local. Interrupted sessions are stopped by the app server.
@@ -628,6 +644,7 @@ function installMedia(enableAvatar = false) {
     resetCodexTurnState(false);
   };
   const destroyCodexBridge = () => {
+    codexInputGeneration++;
     abortCodexSpeech?.();
     abortCodexSpeech = null;
     restoreTeamsSenders().catch(() => {});
@@ -788,6 +805,410 @@ function installMedia(enableAvatar = false) {
       return getMedia(constraints);
     };
   }
+  const capturePcm16k = async ({
+    maxSpeakMs = 8000,
+    autoListen = true,
+    idleWaitMs = 12000,
+    silenceMs = 450,
+    supportUpgrade = false,
+  } = {}) => {
+    await start();
+    if (context.state === 'suspended') await context.resume().catch(() => {});
+    if (maxSpeakMs <= 0) throw new Error('Invalid capture duration');
+    if (typeof context.createScriptProcessor !== 'function') {
+      return window.__nailMedia.record(Math.min(maxSpeakMs, 12000), autoListen, idleWaitMs, false);
+    }
+    const sources = [];
+    const attachedTracks = new Set();
+    let onTrackAttach = null;
+    let processorNode = null;
+    let result = null;
+    let isAutoListen = Boolean(autoListen);
+    try {
+      const bus = context.createGain();
+      bus.gain.value = 1;
+      processorNode = context.createScriptProcessor(2048, 1, 1);
+      const sink = context.createGain();
+      sink.gain.value = 0;
+      bus.connect(processorNode);
+      processorNode.connect(sink);
+      if (mix) {
+        try { sink.connect(mix); } catch {}
+      }
+      if (context.destination) {
+        try { sink.connect(context.destination); } catch {}
+      }
+      sources.push(bus, processorNode, sink);
+      let notifyTrackAttached = null;
+      const attachRemoteTrack = track => {
+        if (!track || track.kind !== 'audio' || track.readyState !== 'live' || attachedTracks.has(track)) return;
+        try {
+          const source = context.createMediaStreamSource(new MediaStream([track]));
+          source.connect(bus);
+          sources.push(source);
+          attachedTracks.add(track);
+          notifyTrackAttached?.();
+        } catch {}
+      };
+      onTrackAttach = attachRemoteTrack;
+      activeRecordTrackAttach.add(onTrackAttach);
+      for (const track of remote.keys()) attachRemoteTrack(track);
+      if (!attachedTracks.size && !(await waitForLiveTrack(attachedTracks, attachRemoteTrack, idleWaitMs, fn => { notifyTrackAttached = fn; }))) {
+        window.__nailDiagnostics = {
+          tracks: remote.size,
+          live: attachedTracks.size,
+          muted: [...remote.keys()].filter(t => t.muted).length,
+        };
+        return null;
+      }
+      window.__nailDiagnostics = {
+        tracks: remote.size,
+        live: attachedTracks.size,
+        muted: [...remote.keys()].filter(t => t.muted).length,
+      };
+
+      const srcRate = context.sampleRate || 48000;
+      const targetRate = 16000;
+      const ratio = srcRate / targetRate;
+      const bufferSize = processorNode.bufferSize || 2048;
+      const frameMs = Math.max(10, (bufferSize / srcRate) * 1000);
+      const maxIdleTicks = Math.max(1, Math.ceil(idleWaitMs / frameMs));
+      const maxSpeechTicks = Math.max(1, Math.ceil(maxSpeakMs / frameMs));
+      const requiredSilentTicks = Math.max(2, Math.ceil(silenceMs / frameMs));
+      const earlyAbortSilentTicks = Math.max(5, Math.ceil(360 / frameMs));
+      const minVoicedTicks = Math.max(2, Math.min(4, Math.ceil(160 / frameMs)));
+      const minStrongVoicedTicks = Math.max(2, minVoicedTicks - 1);
+      const maxPreRollSamples = Math.round(targetRate * 0.2);
+      const maxPcmBytes = 1024 * 1024;
+      const maxPcmSamples = maxPcmBytes >> 1;
+
+      let leftover = new Float32Array(0);
+      const downsampleToInt16 = input => {
+        if (!input || !input.length) return new Int16Array(0);
+        if (srcRate === targetRate) {
+          const out = new Int16Array(input.length);
+          for (let i = 0; i < input.length; i++) {
+            const clamped = Math.max(-1, Math.min(1, input[i]));
+            out[i] = clamped < 0 ? Math.round(clamped * 32768) : Math.round(clamped * 32767);
+          }
+          return out;
+        }
+        let combined = input;
+        if (leftover.length) {
+          combined = new Float32Array(leftover.length + input.length);
+          combined.set(leftover, 0);
+          combined.set(input, leftover.length);
+        }
+        const outLen = Math.floor(combined.length / ratio);
+        if (outLen <= 0) {
+          leftover = new Float32Array(combined);
+          return new Int16Array(0);
+        }
+        const out = new Int16Array(outLen);
+        for (let i = 0; i < outLen; i++) {
+          const startIdx = Math.floor(i * ratio);
+          const endIdx = Math.max(startIdx + 1, Math.floor((i + 1) * ratio));
+          let sum = 0;
+          for (let j = startIdx; j < endIdx && j < combined.length; j++) sum += combined[j];
+          const avg = sum / (endIdx - startIdx);
+          const clamped = Math.max(-1, Math.min(1, avg));
+          out[i] = clamped < 0 ? Math.round(clamped * 32768) : Math.round(clamped * 32767);
+        }
+        const consumed = Math.floor(outLen * ratio);
+        leftover = combined.slice(consumed);
+        return out;
+      };
+
+      result = await new Promise(resolve => {
+        const preRollChunks = [];
+        let preRollSamples = 0;
+        const recordedChunks = [];
+        let recordedSamples = 0;
+        let waitStartedAt = Date.now();
+        let voiceStartedAt = 0;
+        let lastVoicedAt = 0;
+        let ticks = 0;
+        let speechTicks = 0;
+        let voicedTicks = 0;
+        let strongVoicedTicks = 0;
+        let silentTicks = 0;
+        let onsetStreak = 0;
+        let onsetPeakRms = 0;
+        let onsetEnergySum = 0;
+        let peakRms = 0;
+        let voicedEnergySum = 0;
+        let noiseFloor = isAutoListen ? 0.004 : 0.003;
+        let wasAutoListen = isAutoListen;
+        let started = !isAutoListen;
+        let aborted = false;
+        let settled = false;
+        let watchdog = null;
+
+        const finish = keep => {
+          if (settled) return;
+          settled = true;
+          if (watchdog) { clearInterval(watchdog); watchdog = null; }
+          if (processorNode) processorNode.onaudioprocess = null;
+          if (window.__nailAbortRecord === onAbort) window.__nailAbortRecord = null;
+          if (supportUpgrade && window.__nailUpgradeRecord === onUpgrade) window.__nailUpgradeRecord = null;
+          const avgVoicedRms = voicedTicks > 0 ? Math.sqrt(voicedEnergySum / voicedTicks) : 0;
+          const reqMinVoiced = wasAutoListen ? minVoicedTicks : 2;
+          const reqMinStrong = wasAutoListen ? minStrongVoicedTicks : 0;
+          const minPeakRms = wasAutoListen ? Math.max(0.018, noiseFloor * 2.5) : 0.0035;
+          const minVoicedRms = wasAutoListen ? Math.max(0.013, noiseFloor * 1.9) : 0.003;
+          if (
+            !keep ||
+            aborted ||
+            !started ||
+            voicedTicks < reqMinVoiced ||
+            strongVoicedTicks < reqMinStrong ||
+            peakRms < minPeakRms ||
+            avgVoicedRms < minVoicedRms ||
+            recordedSamples <= 0
+          ) {
+            if (fallbackToRecord && !aborted) {
+              resolve({__fallbackToRecord: true});
+            } else {
+              resolve(null);
+            }
+            return;
+          }
+          const endedAt = Date.now();
+          const speechEndedAtMs = lastVoicedAt || endedAt;
+          const silenceWaitMs = Math.max(0, endedAt - speechEndedAtMs);
+          const totalSamples = Math.min(recordedSamples, maxPcmSamples);
+          const bytes = new Uint8Array(totalSamples * 2);
+          let byteOffset = 0;
+          for (const chunk of recordedChunks) {
+            for (let i = 0; i < chunk.length && byteOffset < bytes.length; i++) {
+              const sample = chunk[i];
+              bytes[byteOffset++] = sample & 0xff;
+              bytes[byteOffset++] = (sample >> 8) & 0xff;
+            }
+            if (byteOffset >= bytes.length) break;
+          }
+          resolve({
+            pcmBase64: audioBase64(bytes),
+            sampleRate: targetRate,
+            silenceWaitMs,
+            speechEndedAtMs,
+            durationMs: Math.round((totalSamples / targetRate) * 1000),
+          });
+        };
+
+        const appendRecordedChunk = pcmChunk => {
+          if (!pcmChunk || !pcmChunk.length) return false;
+          const remaining = maxPcmSamples - recordedSamples;
+          if (remaining <= 0) return true;
+          const slice = pcmChunk.length > remaining ? pcmChunk.subarray(0, remaining) : pcmChunk;
+          recordedChunks.push(slice);
+          recordedSamples += slice.length;
+          return recordedSamples >= maxPcmSamples;
+        };
+
+        const pushPreRoll = pcmChunk => {
+          if (!pcmChunk.length) return;
+          preRollChunks.push(pcmChunk);
+          preRollSamples += pcmChunk.length;
+          while (preRollSamples > maxPreRollSamples && preRollChunks.length > 0) {
+            const extra = preRollSamples - maxPreRollSamples;
+            if (preRollChunks[0].length <= extra) {
+              preRollSamples -= preRollChunks[0].length;
+              preRollChunks.shift();
+            } else {
+              preRollChunks[0] = preRollChunks[0].subarray(extra);
+              preRollSamples -= extra;
+            }
+          }
+        };
+
+        const flushPreRoll = () => {
+          for (const prior of preRollChunks) {
+            if (appendRecordedChunk(prior)) return true;
+          }
+          preRollChunks.length = 0;
+          preRollSamples = 0;
+          return false;
+        };
+
+        const onAbort = () => {
+          aborted = true;
+          finish(false);
+        };
+        window.__nailAbortRecord = onAbort;
+
+        const onUpgrade = () => {
+          if (settled) return false;
+          isAutoListen = false;
+          wasAutoListen = false;
+          waitStartedAt = Date.now();
+          ticks = 0;
+          speechTicks = 0;
+          silentTicks = 0;
+          onsetStreak = 0;
+          onsetPeakRms = 0;
+          onsetEnergySum = 0;
+          if (!started) {
+            started = true;
+            if (flushPreRoll()) finish(true);
+          }
+          return true;
+        };
+        if (supportUpgrade) window.__nailUpgradeRecord = onUpgrade;
+
+        let fallbackToRecord = false;
+        watchdog = setInterval(() => {
+          const now = Date.now();
+          if (ticks === 0 && now - waitStartedAt >= 650) {
+            fallbackToRecord = true;
+            finish(false);
+            return;
+          }
+          if (voicedTicks === 0 && now - waitStartedAt >= idleWaitMs) {
+            finish(false);
+          } else if (voiceStartedAt && now - voiceStartedAt >= maxSpeakMs) {
+            finish(true);
+          }
+        }, 100);
+
+        processorNode.onaudioprocess = ev => {
+          if (settled) return;
+          const input = ev?.inputBuffer?.getChannelData?.(0);
+          if (!input || !input.length) return;
+          ticks++;
+          if (voicedTicks > 0) speechTicks++;
+          window.__nailDiagnostics = {
+            tracks: remote.size,
+            live: attachedTracks.size,
+            muted: [...remote.keys()].filter(t => t.muted).length,
+          };
+          let sum = 0;
+          for (let i = 0; i < input.length; i++) sum += input[i] * input[i];
+          const rms = Math.sqrt(sum / input.length);
+          const now = Date.now();
+          const inEchoGuard = isAutoListen && (now - lastPlayEndedAt < 450);
+          const startThreshold = isAutoListen ? Math.max(0.014, noiseFloor * 2.2) : 0.0035;
+          const sustainThreshold = isAutoListen ? Math.max(0.009, noiseFloor * 1.6) : 0.003;
+          const spikeThreshold = isAutoListen ? Math.max(0.028, startThreshold * 2.0) : 0.015;
+          const pcmChunk = downsampleToInt16(input);
+
+          if (!started) {
+            if (!inEchoGuard && rms >= startThreshold) {
+              onsetStreak++;
+              onsetPeakRms = Math.max(onsetPeakRms, rms);
+              onsetEnergySum += rms * rms;
+              if (onsetStreak >= 2 || rms >= spikeThreshold) {
+                started = true;
+                voiceStartedAt = now;
+                lastVoicedAt = now;
+                ticks = 0;
+                speechTicks = 1;
+                voicedTicks = onsetStreak;
+                strongVoicedTicks = onsetStreak;
+                peakRms = onsetPeakRms;
+                voicedEnergySum = onsetEnergySum;
+                silentTicks = 0;
+                if (flushPreRoll() || appendRecordedChunk(pcmChunk)) { finish(true); return; }
+                return;
+              }
+            } else {
+              onsetStreak = 0;
+              onsetPeakRms = 0;
+              onsetEnergySum = 0;
+              noiseFloor = Math.min(0.012, Math.max(0.002, noiseFloor * 0.9 + rms * 0.1));
+            }
+            pushPreRoll(pcmChunk);
+            if (ticks >= maxIdleTicks || now - waitStartedAt >= idleWaitMs) {
+              finish(false);
+            }
+            return;
+          }
+
+          if (voicedTicks === 0) {
+            if (rms >= sustainThreshold) {
+              voiceStartedAt = now;
+              lastVoicedAt = now;
+              speechTicks = 1;
+              voicedTicks = 1;
+              strongVoicedTicks = rms >= startThreshold ? 1 : 0;
+              peakRms = rms;
+              voicedEnergySum = rms * rms;
+              silentTicks = 0;
+              if (flushPreRoll() || appendRecordedChunk(pcmChunk)) { finish(true); return; }
+            } else {
+              noiseFloor = Math.min(0.012, Math.max(0.002, noiseFloor * 0.9 + rms * 0.1));
+              pushPreRoll(pcmChunk);
+              if (ticks >= maxIdleTicks || now - waitStartedAt >= idleWaitMs) {
+                finish(false);
+              }
+            }
+            return;
+          }
+
+          if (appendRecordedChunk(pcmChunk)) {
+            if (rms >= sustainThreshold) {
+              voicedTicks++;
+              if (rms >= startThreshold) strongVoicedTicks++;
+              peakRms = Math.max(peakRms, rms);
+              voicedEnergySum += rms * rms;
+              lastVoicedAt = now;
+            }
+            finish(true);
+            return;
+          }
+
+          if (rms >= sustainThreshold) {
+            voicedTicks++;
+            if (rms >= startThreshold) strongVoicedTicks++;
+            peakRms = Math.max(peakRms, rms);
+            voicedEnergySum += rms * rms;
+            silentTicks = 0;
+            lastVoicedAt = now;
+          } else {
+            silentTicks++;
+            if (isAutoListen) {
+              if ((voicedTicks < minVoicedTicks || strongVoicedTicks < minStrongVoicedTicks) && silentTicks >= earlyAbortSilentTicks) {
+                aborted = true;
+                finish(false);
+                return;
+              }
+              if (voicedTicks >= minVoicedTicks && strongVoicedTicks >= minStrongVoicedTicks && silentTicks >= requiredSilentTicks) {
+                finish(true);
+                return;
+              }
+            } else if (voicedTicks === 1 && silentTicks >= earlyAbortSilentTicks) {
+              voicedTicks = 0;
+              speechTicks = 0;
+              voiceStartedAt = 0;
+              silentTicks = 0;
+              strongVoicedTicks = 0;
+              peakRms = 0;
+              voicedEnergySum = 0;
+              recordedChunks.length = 0;
+              recordedSamples = 0;
+            } else if (voicedTicks >= 2 && silentTicks >= requiredSilentTicks) {
+              finish(true);
+              return;
+            }
+          }
+
+          if (speechTicks >= maxSpeechTicks || (voiceStartedAt && now - voiceStartedAt >= maxSpeakMs)) {
+            finish(true);
+          }
+        };
+      });
+    } finally {
+      if (onTrackAttach) activeRecordTrackAttach.delete(onTrackAttach);
+      if (processorNode) processorNode.onaudioprocess = null;
+      for (const source of sources) {
+        try { source.disconnect(); } catch {}
+      }
+    }
+    if (result?.__fallbackToRecord) {
+      return window.__nailMedia.record(Math.min(maxSpeakMs, 12000), isAutoListen, idleWaitMs, false);
+    }
+    return result;
+  };
   Object.defineProperty(window, '__nailMedia', {value: Object.freeze({
     prepareAvatarCamera,
     drawAvatarFrame,
@@ -796,7 +1217,7 @@ function installMedia(enableAvatar = false) {
       return avatar?.revision === revision && [...avatar.tracks].some(track => track !== avatar.track && track.readyState === 'live');
     },
     avatarAudioSample() {
-      const sending = Boolean(activePlayer || (codexBridge?.outGain?.gain?.value ?? 0) > 0);
+      const sending = Boolean(activePlayer || queuedPlayers.size > 0 || (codexBridge?.outGain?.gain?.value ?? 0) > 0);
       return {rms: sending ? measureMicRms() : 0, sending};
     },
     microphone,
@@ -1116,338 +1537,14 @@ function installMedia(enableAvatar = false) {
         for (const source of sources) source.disconnect();
       }
     },
+    async recordPcm16k(maxSpeakMs = 8000, autoListen = false, idleWaitMs = 12000, silenceMs = 450) {
+      return capturePcm16k({maxSpeakMs, autoListen, idleWaitMs, silenceMs, supportUpgrade: true});
+    },
     async codexRecordWakePcm(maxSpeakMs = 8000, idleWaitMs = 12000, silenceMs = 450) {
-      await start();
-      if (context.state === 'suspended') await context.resume().catch(() => {});
-      if (maxSpeakMs <= 0) throw new Error('Invalid capture duration');
-      if (typeof context.createScriptProcessor !== 'function') {
-        return window.__nailMedia.record(Math.min(maxSpeakMs, 12000), true, idleWaitMs, false);
-      }
-      const sources = [];
-      const attachedTracks = new Set();
-      let onTrackAttach = null;
-      let processorNode = null;
-      let result = null;
-      try {
-        const bus = context.createGain();
-        bus.gain.value = 1;
-        processorNode = context.createScriptProcessor(2048, 1, 1);
-        const sink = context.createGain();
-        sink.gain.value = 0;
-        bus.connect(processorNode);
-        processorNode.connect(sink);
-        if (mix) {
-          try { sink.connect(mix); } catch {}
-        }
-        if (context.destination) {
-          try { sink.connect(context.destination); } catch {}
-        }
-        sources.push(bus, processorNode, sink);
-        let notifyTrackAttached = null;
-        const attachRemoteTrack = track => {
-          if (!track || track.kind !== 'audio' || track.readyState !== 'live' || attachedTracks.has(track)) return;
-          try {
-            const source = context.createMediaStreamSource(new MediaStream([track]));
-            source.connect(bus);
-            sources.push(source);
-            attachedTracks.add(track);
-            notifyTrackAttached?.();
-          } catch {}
-        };
-        onTrackAttach = attachRemoteTrack;
-        activeRecordTrackAttach.add(onTrackAttach);
-        for (const track of remote.keys()) attachRemoteTrack(track);
-        if (!attachedTracks.size && !(await waitForLiveTrack(attachedTracks, attachRemoteTrack, idleWaitMs, fn => { notifyTrackAttached = fn; }))) {
-          window.__nailDiagnostics = {
-            tracks: remote.size,
-            live: attachedTracks.size,
-            muted: [...remote.keys()].filter(t => t.muted).length,
-          };
-          return null;
-        }
-        window.__nailDiagnostics = {
-          tracks: remote.size,
-          live: attachedTracks.size,
-          muted: [...remote.keys()].filter(t => t.muted).length,
-        };
-
-        const srcRate = context.sampleRate || 48000;
-        const targetRate = 16000;
-        const ratio = srcRate / targetRate;
-        const bufferSize = processorNode.bufferSize || 2048;
-        const frameMs = Math.max(10, (bufferSize / srcRate) * 1000);
-        const maxIdleTicks = Math.max(1, Math.ceil(idleWaitMs / frameMs));
-        const maxSpeechTicks = Math.max(1, Math.ceil(maxSpeakMs / frameMs));
-        const requiredSilentTicks = Math.max(2, Math.ceil(silenceMs / frameMs));
-        const earlyAbortSilentTicks = Math.max(5, Math.ceil(360 / frameMs));
-        const minVoicedTicks = Math.max(2, Math.min(4, Math.ceil(160 / frameMs)));
-        const minStrongVoicedTicks = Math.max(2, minVoicedTicks - 1);
-        const maxPreRollSamples = Math.round(targetRate * 0.2);
-        const maxPcmBytes = 1024 * 1024;
-        const maxPcmSamples = maxPcmBytes >> 1;
-
-        let leftover = new Float32Array(0);
-        const downsampleToInt16 = input => {
-          if (!input || !input.length) return new Int16Array(0);
-          if (srcRate === targetRate) {
-            const out = new Int16Array(input.length);
-            for (let i = 0; i < input.length; i++) {
-              const clamped = Math.max(-1, Math.min(1, input[i]));
-              out[i] = clamped < 0 ? Math.round(clamped * 32768) : Math.round(clamped * 32767);
-            }
-            return out;
-          }
-          let combined = input;
-          if (leftover.length) {
-            combined = new Float32Array(leftover.length + input.length);
-            combined.set(leftover, 0);
-            combined.set(input, leftover.length);
-          }
-          const outLen = Math.floor(combined.length / ratio);
-          if (outLen <= 0) {
-            leftover = new Float32Array(combined);
-            return new Int16Array(0);
-          }
-          const out = new Int16Array(outLen);
-          for (let i = 0; i < outLen; i++) {
-            const startIdx = Math.floor(i * ratio);
-            const endIdx = Math.max(startIdx + 1, Math.floor((i + 1) * ratio));
-            let sum = 0;
-            for (let j = startIdx; j < endIdx && j < combined.length; j++) sum += combined[j];
-            const avg = sum / (endIdx - startIdx);
-            const clamped = Math.max(-1, Math.min(1, avg));
-            out[i] = clamped < 0 ? Math.round(clamped * 32768) : Math.round(clamped * 32767);
-          }
-          const consumed = Math.floor(outLen * ratio);
-          leftover = combined.slice(consumed);
-          return out;
-        };
-
-        result = await new Promise(resolve => {
-          const preRollChunks = [];
-          let preRollSamples = 0;
-          const recordedChunks = [];
-          let recordedSamples = 0;
-          const waitStartedAt = Date.now();
-          let voiceStartedAt = 0;
-          let lastVoicedAt = 0;
-          let ticks = 0;
-          let speechTicks = 0;
-          let voicedTicks = 0;
-          let strongVoicedTicks = 0;
-          let silentTicks = 0;
-          let onsetStreak = 0;
-          let onsetPeakRms = 0;
-          let onsetEnergySum = 0;
-          let peakRms = 0;
-          let voicedEnergySum = 0;
-          let noiseFloor = 0.004;
-          let started = false;
-          let aborted = false;
-          let settled = false;
-          let watchdog = null;
-
-          const finish = keep => {
-            if (settled) return;
-            settled = true;
-            if (watchdog) { clearInterval(watchdog); watchdog = null; }
-            if (processorNode) processorNode.onaudioprocess = null;
-            if (window.__nailAbortRecord === onAbort) window.__nailAbortRecord = null;
-            const avgVoicedRms = voicedTicks > 0 ? Math.sqrt(voicedEnergySum / voicedTicks) : 0;
-            const minPeakRms = Math.max(0.018, noiseFloor * 2.5);
-            const minVoicedRms = Math.max(0.013, noiseFloor * 1.9);
-            if (
-              !keep ||
-              aborted ||
-              !started ||
-              voicedTicks < minVoicedTicks ||
-              strongVoicedTicks < minStrongVoicedTicks ||
-              peakRms < minPeakRms ||
-              avgVoicedRms < minVoicedRms ||
-              recordedSamples <= 0
-            ) {
-              if (fallbackToRecord && !aborted) {
-                resolve({__fallbackToRecord: true});
-              } else {
-                resolve(null);
-              }
-              return;
-            }
-            const endedAt = Date.now();
-            const speechEndedAtMs = lastVoicedAt || endedAt;
-            const silenceWaitMs = Math.max(0, endedAt - speechEndedAtMs);
-            const totalSamples = Math.min(recordedSamples, maxPcmSamples);
-            const bytes = new Uint8Array(totalSamples * 2);
-            let byteOffset = 0;
-            for (const chunk of recordedChunks) {
-              for (let i = 0; i < chunk.length && byteOffset < bytes.length; i++) {
-                const sample = chunk[i];
-                bytes[byteOffset++] = sample & 0xff;
-                bytes[byteOffset++] = (sample >> 8) & 0xff;
-              }
-              if (byteOffset >= bytes.length) break;
-            }
-            resolve({
-              pcmBase64: audioBase64(bytes),
-              sampleRate: targetRate,
-              silenceWaitMs,
-              speechEndedAtMs,
-              durationMs: Math.round((totalSamples / targetRate) * 1000),
-            });
-          };
-
-          const onAbort = () => {
-            aborted = true;
-            finish(false);
-          };
-          window.__nailAbortRecord = onAbort;
-
-          const appendRecordedChunk = pcmChunk => {
-            if (!pcmChunk || !pcmChunk.length) return false;
-            const remaining = maxPcmSamples - recordedSamples;
-            if (remaining <= 0) return true;
-            const slice = pcmChunk.length > remaining ? pcmChunk.subarray(0, remaining) : pcmChunk;
-            recordedChunks.push(slice);
-            recordedSamples += slice.length;
-            return recordedSamples >= maxPcmSamples;
-          };
-
-          let fallbackToRecord = false;
-          watchdog = setInterval(() => {
-            const now = Date.now();
-            if (ticks === 0 && now - waitStartedAt >= 650) {
-              fallbackToRecord = true;
-              finish(false);
-              return;
-            }
-            if (!started && now - waitStartedAt >= idleWaitMs) {
-              finish(false);
-            } else if (started && voiceStartedAt && now - voiceStartedAt >= maxSpeakMs) {
-              finish(true);
-            }
-          }, 100);
-
-          processorNode.onaudioprocess = ev => {
-            if (settled) return;
-            const input = ev?.inputBuffer?.getChannelData?.(0);
-            if (!input || !input.length) return;
-            ticks++;
-            if (voicedTicks > 0) speechTicks++;
-            window.__nailDiagnostics = {
-              tracks: remote.size,
-              live: attachedTracks.size,
-              muted: [...remote.keys()].filter(t => t.muted).length,
-            };
-            let sum = 0;
-            for (let i = 0; i < input.length; i++) sum += input[i] * input[i];
-            const rms = Math.sqrt(sum / input.length);
-            const now = Date.now();
-            const inEchoGuard = now - lastPlayEndedAt < 450;
-            const startThreshold = Math.max(0.014, noiseFloor * 2.2);
-            const sustainThreshold = Math.max(0.009, noiseFloor * 1.6);
-            const spikeThreshold = Math.max(0.028, startThreshold * 2.0);
-            const pcmChunk = downsampleToInt16(input);
-
-            if (!started) {
-              if (!inEchoGuard && rms >= startThreshold) {
-                onsetStreak++;
-                onsetPeakRms = Math.max(onsetPeakRms, rms);
-                onsetEnergySum += rms * rms;
-                if (onsetStreak >= 2 || rms >= spikeThreshold) {
-                  started = true;
-                  voiceStartedAt = now;
-                  lastVoicedAt = now;
-                  ticks = 0;
-                  speechTicks = 1;
-                  voicedTicks = onsetStreak;
-                  strongVoicedTicks = onsetStreak;
-                  peakRms = onsetPeakRms;
-                  voicedEnergySum = onsetEnergySum;
-                  silentTicks = 0;
-                  for (const prior of preRollChunks) {
-                    if (appendRecordedChunk(prior)) { finish(true); return; }
-                  }
-                  preRollChunks.length = 0;
-                  preRollSamples = 0;
-                  if (appendRecordedChunk(pcmChunk)) { finish(true); return; }
-                  return;
-                }
-              } else {
-                onsetStreak = 0;
-                onsetPeakRms = 0;
-                onsetEnergySum = 0;
-                noiseFloor = Math.min(0.012, Math.max(0.002, noiseFloor * 0.9 + rms * 0.1));
-              }
-              if (pcmChunk.length) {
-                preRollChunks.push(pcmChunk);
-                preRollSamples += pcmChunk.length;
-                while (preRollSamples > maxPreRollSamples && preRollChunks.length > 0) {
-                  const extra = preRollSamples - maxPreRollSamples;
-                  if (preRollChunks[0].length <= extra) {
-                    preRollSamples -= preRollChunks[0].length;
-                    preRollChunks.shift();
-                  } else {
-                    preRollChunks[0] = preRollChunks[0].subarray(extra);
-                    preRollSamples -= extra;
-                  }
-                }
-              }
-              if (ticks >= maxIdleTicks || now - waitStartedAt >= idleWaitMs) {
-                finish(false);
-              }
-              return;
-            }
-
-            if (appendRecordedChunk(pcmChunk)) {
-              if (rms >= sustainThreshold) {
-                voicedTicks++;
-                if (rms >= startThreshold) strongVoicedTicks++;
-                peakRms = Math.max(peakRms, rms);
-                voicedEnergySum += rms * rms;
-                lastVoicedAt = now;
-              }
-              finish(true);
-              return;
-            }
-
-            if (rms >= sustainThreshold) {
-              voicedTicks++;
-              if (rms >= startThreshold) strongVoicedTicks++;
-              peakRms = Math.max(peakRms, rms);
-              voicedEnergySum += rms * rms;
-              silentTicks = 0;
-              lastVoicedAt = now;
-            } else {
-              silentTicks++;
-              if ((voicedTicks < minVoicedTicks || strongVoicedTicks < minStrongVoicedTicks) && silentTicks >= earlyAbortSilentTicks) {
-                aborted = true;
-                finish(false);
-                return;
-              }
-              if (voicedTicks >= minVoicedTicks && strongVoicedTicks >= minStrongVoicedTicks && silentTicks >= requiredSilentTicks) {
-                finish(true);
-                return;
-              }
-            }
-
-            if (speechTicks >= maxSpeechTicks || (voiceStartedAt && now - voiceStartedAt >= maxSpeakMs)) {
-              finish(true);
-            }
-          };
-        });
-      } finally {
-        if (onTrackAttach) activeRecordTrackAttach.delete(onTrackAttach);
-        if (processorNode) processorNode.onaudioprocess = null;
-        for (const source of sources) {
-          try { source.disconnect(); } catch {}
-        }
-      }
-      if (result?.__fallbackToRecord) {
-        return window.__nailMedia.record(Math.min(maxSpeakMs, 12000), true, idleWaitMs, false);
-      }
-      return result;
+      return capturePcm16k({maxSpeakMs, autoListen: true, idleWaitMs, silenceMs, supportUpgrade: false});
     },
     async play(encoded) {
+      if (queuedPlayers.size > 0 || chunkInFlightCount > 0) this.stopPlay();
       await start();
       if (context.state === 'suspended') await context.resume().catch(() => {});
       resumePageContexts();
@@ -1479,13 +1576,108 @@ function installMedia(enableAvatar = false) {
         await restoreTeamsSenders();
       }
     },
+    playChunk(encoded) {
+      if (typeof encoded !== 'string' || !encoded) return Promise.resolve(false);
+      const epoch = playbackEpoch;
+      if (activePlayDone) activePlayDone();
+      chunkInFlightCount++;
+      const task = chunkQueueChain.then(async () => {
+        try {
+          if (epoch !== playbackEpoch) return false;
+          await start();
+          if (epoch !== playbackEpoch) return false;
+          if (context.state === 'suspended') await context.resume().catch(() => {});
+          resumePageContexts();
+          if (!chunkTeamsAttached) {
+            await attachTeamsVirtualSenders();
+            if (epoch !== playbackEpoch) {
+              await restoreTeamsSenders().catch(() => {});
+              return false;
+            }
+            chunkTeamsAttached = true;
+          }
+          const wav = Uint8Array.from(atob(encoded), c => c.charCodeAt(0));
+          const buffer = await context.decodeAudioData(wav.buffer.slice(wav.byteOffset, wav.byteOffset + wav.byteLength));
+          if (epoch !== playbackEpoch) return false;
+          const player = context.createBufferSource();
+          player.buffer = buffer;
+          player.connect(micBus);
+          const now = Number.isFinite(context.currentTime) ? context.currentTime : 0;
+          const startAt = Math.max(now, chunkNextTime);
+          const duration = Number.isFinite(buffer?.duration) && buffer.duration > 0 ? buffer.duration : 0;
+          chunkNextTime = startAt + duration;
+          queuedPlayers.add(player);
+          activePlayer = player;
+          player.onended = () => {
+            queuedPlayers.delete(player);
+            if (activePlayer === player) {
+              activePlayer = queuedPlayers.size ? [...queuedPlayers].pop() : null;
+            }
+            lastPlayEndedAt = Date.now();
+            try { player.disconnect(); } catch {}
+            if (queuedPlayers.size === 0 && chunkInFlightCount === 0) {
+              chunkNextTime = 0;
+              const shouldRestore = chunkTeamsAttached;
+              chunkTeamsAttached = false;
+              const restoreDone = shouldRestore ? restoreTeamsSenders().catch(() => {}) : Promise.resolve();
+              restoreDone.finally(() => notifyPlaybackIdle());
+            }
+          };
+          player.start(startAt);
+          return true;
+        } finally {
+          chunkInFlightCount--;
+          if (queuedPlayers.size === 0 && chunkInFlightCount === 0) {
+            chunkNextTime = 0;
+            if (chunkTeamsAttached) {
+              chunkTeamsAttached = false;
+              await restoreTeamsSenders().catch(() => {});
+            }
+            notifyPlaybackIdle();
+          }
+        }
+      });
+      chunkQueueChain = task.catch(() => {});
+      return task;
+    },
+    async waitPlayback() {
+      await chunkQueueChain;
+      while (queuedPlayers.size > 0 || chunkInFlightCount > 0) {
+        await new Promise(resolve => {
+          if (queuedPlayers.size === 0 && chunkInFlightCount === 0) {
+            resolve();
+            return;
+          }
+          playbackIdleWaiters.add(resolve);
+        });
+        await chunkQueueChain;
+      }
+      if (chunkTeamsAttached) {
+        chunkTeamsAttached = false;
+        await restoreTeamsSenders().catch(() => {});
+      }
+    },
     stopPlay() {
+      playbackEpoch++;
+      chunkNextTime = 0;
+      const wasChunkAttached = chunkTeamsAttached;
+      chunkTeamsAttached = false;
+      for (const p of [...queuedPlayers]) {
+        queuedPlayers.delete(p);
+        p.onended = null;
+        try { p.stop(); } catch {}
+        try { p.disconnect(); } catch {}
+      }
       const player = activePlayer;
       const done = activePlayDone;
+      activePlayer = null;
       lastPlayEndedAt = Date.now();
       if (player) { try { player.stop(); } catch {} }
       if (done) done();
-      restoreTeamsSenders().catch(() => {});
+      notifyPlaybackIdle();
+      if (wasChunkAttached || replacedSenders.size > 0) {
+        restoreTeamsSenders().catch(() => {});
+      }
     },
     async codexConnect() {
       await start();
@@ -1596,6 +1788,51 @@ function installMedia(enableAvatar = false) {
     async codexAnswer(sdp) {
       if (!codexBridge?.pc) throw new Error('voice-codex-connection');
       await codexBridge.pc.setRemoteDescription({type: 'answer', sdp});
+    },
+    async codexPlayCapturedAudio(encoded, format) {
+      if (!codexBridge || !context) throw new Error('voice-codex-connection');
+      const generation = codexInputGeneration;
+      const bridge = codexBridge;
+      if (typeof encoded !== 'string' || !encoded || encoded.length > 1_500_000 || !['pcm16k', 'webm'].includes(format)) {
+        throw new Error('voice-invalid-captured-audio');
+      }
+      const bytes = Uint8Array.from(atob(encoded), c => c.charCodeAt(0));
+      let decoded;
+      if (format === 'pcm16k') {
+        if (!bytes.length || bytes.length % 2) throw new Error('voice-invalid-captured-audio');
+        decoded = context.createBuffer(1, bytes.length / 2, 16000);
+        const samples = decoded.getChannelData(0);
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        for (let i = 0; i < samples.length; i++) samples[i] = view.getInt16(i * 2, true) / 32768;
+      } else {
+        decoded = await context.decodeAudioData(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+      }
+      if (!decoded.length || decoded.duration > 13) throw new Error('voice-invalid-captured-audio');
+      if (context.state === 'suspended') await context.resume();
+      if (codexBridge !== bridge || codexInputGeneration !== generation) return {spoke: false, aborted: true};
+      resetCodexTurnState(true);
+      bridge.inGain.gain.value = 0;
+      // Include trailing silence to let the server detect the end of the utterance.
+      const buffer = context.createBuffer(decoded.numberOfChannels || 1, decoded.length + Math.ceil(decoded.sampleRate * 0.7), decoded.sampleRate);
+      for (let channel = 0; channel < (decoded.numberOfChannels || 1); channel++) buffer.copyToChannel(decoded.getChannelData(channel), channel);
+      const source = context.createBufferSource();
+      source.buffer = buffer;
+      source.connect(bridge.inDest);
+      return await new Promise((resolve, reject) => {
+        let settled = false;
+        const finish = aborted => {
+          if (settled) return;
+          settled = true;
+          if (abortCodexSpeech === onAbort) abortCodexSpeech = null;
+          source.onended = null;
+          try { source.disconnect(); } catch {}
+          resolve({spoke: !aborted, aborted, speechEndedAtMs: Date.now(), silenceWaitMs: 0});
+        };
+        const onAbort = () => { try { source.stop(); } catch {} finish(true); };
+        abortCodexSpeech = onAbort;
+        source.onended = () => finish(false);
+        try { source.start(); } catch (error) { abortCodexSpeech = null; source.disconnect(); reject(error); }
+      });
     },
     async codexWaitUserSpeech(maxWaitMs = 8000, maxSpeakMs = 12000, silenceMs = 350) {
       if (!codexBridge) throw new Error('voice-codex-connection');

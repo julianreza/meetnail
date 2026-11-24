@@ -74,8 +74,11 @@ class ElevenLabsKeyResolutionTests(unittest.TestCase):
 
 
 class ElevenLabsRequestAndConversionTests(unittest.TestCase):
-    def test_request_url_headers_payload_ffmpeg_and_cleanup(self):
+    def test_request_url_headers_payload_pcm16000_writes_wav_without_ffmpeg(self):
+        import wave
+
         captured = {}
+        raw_pcm = (b"\x01\x00\xff\x7f" * 400)  # 800 samples of 16-bit PCM
 
         def fake_urlopen(req, timeout=None):
             captured["url"] = req.full_url
@@ -83,25 +86,13 @@ class ElevenLabsRequestAndConversionTests(unittest.TestCase):
             captured["headers"] = {k.lower(): v for k, v in req.header_items()}
             captured["body"] = json.loads(req.data.decode("utf-8"))
             captured["timeout"] = timeout
-            return _FakeHTTPResponse(b"FAKE_MP3_BYTES")
+            return _FakeHTTPResponse(raw_pcm)
 
         with tempfile.TemporaryDirectory() as tmp:
             out_wav = pathlib.Path(tmp) / "reply.wav"
-            tmp_mp3 = out_wav.with_suffix(".eleven.mp3")
-
-            def fake_ffmpeg(cmd, check=False):
-                self.assertTrue(tmp_mp3.exists())
-                self.assertEqual(tmp_mp3.read_bytes(), b"FAKE_MP3_BYTES")
-                self.assertIn("-ar", cmd)
-                self.assertIn("16000", cmd)
-                self.assertIn("pcm_s16le", cmd)
-                self.assertEqual(cmd[-1], str(out_wav))
-                out_wav.write_bytes(b"FAKE_WAV")
-                return Mock(returncode=0)
-
             with patch.dict(os.environ, {"ELEVENLABS_API_KEY": "sk_test_secret"}, clear=False), \
                  patch.object(pipeline.urllib.request, "urlopen", side_effect=fake_urlopen), \
-                 patch.object(pipeline.subprocess, "run", side_effect=fake_ffmpeg):
+                 patch.object(pipeline.subprocess, "run", side_effect=AssertionError("ffmpeg must not be called")):
                 meta = pipeline.speak(
                     "**Halo** teman-teman!",
                     out_wav,
@@ -113,17 +104,21 @@ class ElevenLabsRequestAndConversionTests(unittest.TestCase):
                 )
 
             self.assertEqual(meta, {"engine_used": "elevenlabs"})
-            self.assertFalse(tmp_mp3.exists())
             self.assertTrue(out_wav.exists())
+            with wave.open(str(out_wav), "rb") as wf:
+                self.assertEqual(wf.getnchannels(), 1)
+                self.assertEqual(wf.getsampwidth(), 2)
+                self.assertEqual(wf.getframerate(), 16000)
+                self.assertEqual(wf.readframes(wf.getnframes()), raw_pcm)
 
         self.assertEqual(
             captured["url"],
-            "https://api.elevenlabs.io/v1/text-to-speech/EXAVITQu4vr4xnSDxMaL?output_format=mp3_44100_128",
+            "https://api.elevenlabs.io/v1/text-to-speech/EXAVITQu4vr4xnSDxMaL?output_format=pcm_16000",
         )
         self.assertEqual(captured["method"], "POST")
         self.assertEqual(captured["headers"]["xi-api-key"], "sk_test_secret")
         self.assertEqual(captured["headers"]["content-type"], "application/json")
-        self.assertEqual(captured["headers"]["accept"], "audio/mpeg")
+        self.assertEqual(captured["headers"]["accept"], "audio/pcm")
         self.assertEqual(
             captured["body"],
             {
@@ -138,12 +133,20 @@ class ElevenLabsRequestAndConversionTests(unittest.TestCase):
             },
         )
 
-    def test_temp_mp3_cleaned_up_on_ffmpeg_failure_and_falls_back(self):
+    def test_fallback_to_mp3_and_temp_cleanup_on_pcm_rejected_and_ffmpeg_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
             out_wav = pathlib.Path(tmp) / "reply.wav"
             tmp_mp3 = out_wav.with_suffix(".eleven.mp3")
+            urls = []
+
+            def fake_urlopen(req, timeout=None):
+                urls.append(req.full_url)
+                if "output_format=pcm_16000" in req.full_url:
+                    raise _make_http_error(403, b'{"detail":{"status":"output_format_not_allowed","message":"pcm requires higher tier"}}')
+                return _FakeHTTPResponse(b"MP3")
+
             with patch.dict(os.environ, {"ELEVENLABS_API_KEY": "sk_test_secret"}, clear=False), \
-                 patch.object(pipeline.urllib.request, "urlopen", return_value=_FakeHTTPResponse(b"MP3")), \
+                 patch.object(pipeline.urllib.request, "urlopen", side_effect=fake_urlopen), \
                  patch.object(pipeline.subprocess, "run", side_effect=subprocess.CalledProcessError(1, ["ffmpeg"])), \
                  patch.object(pipeline, "speak_edge_tts") as edge_mock, \
                  patch("sys.stderr", new_callable=io.StringIO) as stderr:
@@ -155,6 +158,9 @@ class ElevenLabsRequestAndConversionTests(unittest.TestCase):
                     elevenlabs_voice_id="EXAVITQu4vr4xnSDxMaL",
                 )
 
+            self.assertEqual(len(urls), 2)
+            self.assertIn("output_format=pcm_16000", urls[0])
+            self.assertIn("output_format=mp3_44100_128", urls[1])
             self.assertFalse(tmp_mp3.exists())
             self.assertEqual(meta["engine_used"], "edge")
             self.assertIn("fallback_reason", meta)

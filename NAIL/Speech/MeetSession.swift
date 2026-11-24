@@ -854,7 +854,7 @@ final class MeetSession {
             status = "Sesi Codex Live Voice gagal."
         case "voice-codex-wake-unavailable":
             visualState = .standby
-            status = "Hands-free 'Nail' tidak aktif (Whisper lokal belum siap) — pakai tombol Tanya."
+            status = "Panggilan 'Nail' tidak aktif (detektor lokal belum siap) — pakai tombol Tanya."
         case "voice-unavailable":
             visualState = .error
             status = "Mic virtual Nail gagal disiapkan."

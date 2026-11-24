@@ -1113,7 +1113,7 @@ struct SettingsView: View {
 
     private func stageDotColor(stage: SettingsHUDPreviewStage, isSelected: Bool, palette: NailPalette) -> Color {
         if isSelected {
-            return stage == .standby ? Color(hex: 0x0A0A0A).opacity(0.55) : palette.goldBright
+            return stage == .standby ? palette.secondaryText(for: .porcelain) : palette.goldBright
         }
         switch stage {
         case .standby:
@@ -2394,7 +2394,7 @@ struct SettingsView: View {
         size: CGFloat = 20,
         tone: NeuTone = .porcelain
     ) -> some View {
-        let activeTone: NeuTone = tone == .obsidian ? .porcelain : .obsidian
+        let activeTone = palette.activeContrastTone(for: tone)
         return ZStack {
             if selected {
                 NeuRaisedBackground(isCapsule: true, elevation: 0.68, tone: activeTone)

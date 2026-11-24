@@ -942,3 +942,64 @@ test('CodexLiveSession._awaitReplyTurn bounds stale outSpoke noise and stale del
   const delegElapsed2 = Date.now() - delegStart2;
   assert.ok(delegElapsed2 >= 240 && delegElapsed2 < 700, `Expected ~280ms noReplyTimeoutMs, got ${delegElapsed2}ms`);
 });
+
+test('captured wake audio is sent intact to Codex and never converted to a text prompt', async t => {
+  const session = new CodexLiveSession();
+  t.after(() => session.clearIdleTimer());
+  session.threadId = 'captured';
+  session.webrtcConnected = true;
+  session.ensureConnected = async () => {};
+  session.syncNotesToLiveSession = async () => false;
+  session.callRpc = async method => { assert.notEqual(method, 'thread/realtime/appendText'); };
+  const audioBase64 = Buffer.from([1, 2, 3, 4, 5, 6]).toString('base64');
+  const scripts = [];
+  const wc = {
+    isDestroyed: () => false,
+    async executeJavaScript(script) {
+      scripts.push(script);
+      if (script.includes('codexState')) return {connected: true, rxPackets: 0, rxEnergy: 0};
+      if (script.includes('codexPlayCapturedAudio')) return {spoke: true, speechEndedAtMs: Date.now(), silenceWaitMs: 0};
+      return true;
+    },
+  };
+  session._awaitReplyTurn = async () => ({heard: 'Nail, sebutkan tiga warna', reply: 'Merah, biru, kuning', replyAtMs: Date.now(), latencyMs: 1});
+  const result = await session.runCapturedTurn(wc, {
+    audioBase64,
+    format: 'pcm16k',
+    preTiming: {vadSilenceMs: 452},
+    unmuteMeet: async () => true,
+  });
+  assert.equal(result.heard, 'Nail, sebutkan tiga warna');
+  assert.equal(result.timing.vadSilenceMs, 452);
+  const sent = scripts.find(s => s.includes('codexPlayCapturedAudio'));
+  assert.ok(sent?.includes(JSON.stringify(audioBase64)));
+  assert.ok(sent?.includes('pcm16k'));
+  assert.ok(!scripts.some(s => s.includes('codexWaitUserSpeech')));
+});
+
+test('CodexLiveSession.shouldCompleteTurn finishes stalled dcReplyDone even with residual outRms noise', () => {
+  const now = Date.now();
+  const state = {
+    outSpoke: true,
+    delegationActive: false,
+    awaitingPostDelegation: false,
+    postDelegationSpoke: false,
+    delegationDoneAt: 0,
+    replyDoneAt: now - 3100,
+    replyParts: ['Merah, biru, kuning'],
+    replyDelta: '',
+    heardParts: ['Nail, sebutkan tiga warna'],
+    heardDelta: '',
+    itemBuffers: new Map(),
+    itemRoles: new Map(),
+  };
+  assert.equal(
+    CodexLiveSession.shouldCompleteTurn(state, 10, now - 40, now, {dcReplyDone: true}),
+    true
+  );
+  state.replyDoneAt = now - 500;
+  assert.equal(
+    CodexLiveSession.shouldCompleteTurn(state, 10, now - 40, now, {dcReplyDone: true}),
+    false
+  );
+});

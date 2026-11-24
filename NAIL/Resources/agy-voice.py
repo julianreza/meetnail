@@ -9,18 +9,22 @@ Only --transcribe-daemon uses --speaker-models and --first-speaker.
 """
 
 import argparse
+import concurrent.futures
 import json
 import os
 import pathlib
+import queue
 import re
 import selectors
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import wave
 from collections import Counter
 from itertools import groupby
 
@@ -546,6 +550,102 @@ def build_agy_prompt(system_prompt: str, first_turn: bool, text: str, notes_cont
     return "\n\n".join(parts)
 
 
+class TurnCancelledError(Exception):
+    """Raised when an in-flight turn is cancelled mid-stream."""
+
+
+_SENTENCE_ABBREVIATIONS = frozenset({
+    "rp",
+    "no",
+    "dr",
+    "mr",
+    "mrs",
+    "ms",
+    "prof",
+    "pt",
+    "jl",
+    "dll",
+    "dsb",
+    "dst",
+    "tsb",
+    "yg",
+    "dgn",
+    "utk",
+    "hal",
+    "bln",
+    "thn",
+    "tgl",
+    "s.d",
+    "a.n",
+})
+
+
+def _is_sentence_boundary(text: str, end_idx: int) -> bool:
+    """Return True if punctuation ending at end_idx (exclusive) marks a sentence split."""
+    punct = text[end_idx - 1]
+    if punct == "\n":
+        return True
+    if punct == ".":
+        # Avoid splitting ellipses ("...") or decimal/thousand numbers ("3.5", "50.000").
+        if end_idx >= 2 and text[end_idx - 2] == ".":
+            return False
+        if end_idx < len(text) and text[end_idx] == ".":
+            return False
+        if end_idx >= 2 and text[end_idx - 2].isdigit() and end_idx < len(text) and text[end_idx].isdigit():
+            return False
+        token_match = re.search(r"([A-Za-z.]+)\.$", text[:end_idx])
+        if token_match:
+            word = token_match.group(1).lower()
+            if word in _SENTENCE_ABBREVIATIONS or (len(word) == 1 and token_match.group(1).isupper()):
+                return False
+    return True
+
+
+def _extract_ready_sentences(buffer: str, *, flush: bool = False, min_len: int = 12) -> tuple[list[str], str]:
+    """Split complete sentences from buffer while holding incomplete fragments."""
+    if not buffer:
+        return [], ""
+    sentences: list[str] = []
+    start = 0
+    i = 0
+    n = len(buffer)
+    while i < n:
+        ch = buffer[i]
+        if ch in ".!?\n":
+            punct_end = i + 1
+            if not _is_sentence_boundary(buffer, punct_end):
+                i += 1
+                continue
+            close_end = punct_end
+            while close_end < n and buffer[close_end] in "'\"”’)]":
+                close_end += 1
+            if close_end < n:
+                if ch != "\n" and not buffer[close_end].isspace():
+                    i += 1
+                    continue
+                ws_end = close_end
+                while ws_end < n and buffer[ws_end].isspace():
+                    ws_end += 1
+            elif flush:
+                ws_end = close_end
+            else:
+                break
+            candidate = buffer[start:close_end].strip()
+            if len(candidate) >= min_len or (flush and ws_end == n and candidate):
+                sentences.append(candidate)
+                start = ws_end
+                i = ws_end
+                continue
+        i += 1
+    rest = buffer[start:]
+    if flush:
+        tail = rest.strip()
+        if tail:
+            sentences.append(tail)
+        return sentences, ""
+    return sentences, rest
+
+
 class AgySession:
     def __init__(self, model: str, system_prompt: str = SYSTEM) -> None:
         self.model = model
@@ -553,12 +653,14 @@ class AgySession:
         self.agy_bin = shutil.which("agy") or str(pathlib.Path.home() / ".local/bin/agy")
         self.proc: subprocess.Popen[str] | None = None
         self.first_turn = True
+        self._pending_turn = False
         self._stdout_buf = bytearray()
 
     def start(self) -> None:
         if self.proc and self.proc.poll() is None:
             return
         self._stdout_buf.clear()
+        self._pending_turn = False
         self.proc = subprocess.Popen(
             [
                 self.agy_bin,
@@ -599,8 +701,10 @@ class AgySession:
         finally:
             sel.close()
 
-    def _read_line_with_timeout(self, timeout_s: float) -> str:
+    def _read_line_with_timeout(self, timeout_s: float, cancel_event: threading.Event | None = None) -> str:
         assert self.proc and self.proc.stdout
+        if cancel_event is not None and cancel_event.is_set():
+            raise TurnCancelledError("turn cancelled")
         try:
             fd = self.proc.stdout.fileno()
         except Exception:
@@ -615,11 +719,16 @@ class AgySession:
         try:
             sel.register(fd, selectors.EVENT_READ)
             while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise TurnCancelledError("turn cancelled")
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError("agy response timed out")
-                events = sel.select(timeout=remaining)
+                slice_timeout = min(remaining, 0.05) if cancel_event is not None else remaining
+                events = sel.select(timeout=slice_timeout)
                 if not events:
+                    if cancel_event is not None:
+                        continue
                     raise TimeoutError("agy response timed out")
                 chunk = os.read(fd, 4096)
                 if not chunk:
@@ -637,11 +746,36 @@ class AgySession:
         finally:
             sel.close()
 
+    def _drain_pending_turn(self, timeout_s: float = 10.0) -> None:
+        """Consume the trailing result event from a previously cancelled turn without killing agy."""
+        if not self._pending_turn or not self.proc or self.proc.poll() is not None:
+            self._pending_turn = False
+            return
+        deadline = time.monotonic() + timeout_s
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("timed out draining cancelled agy turn")
+                line = self._read_line_with_timeout(remaining)
+                if not line:
+                    raise RuntimeError("agy stream closed while draining cancelled turn")
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if ev.get("event") == "result":
+                    self._pending_turn = False
+                    return
+        except Exception:
+            self.close()
+
     def warmup(self, timeout_s: float = 30.0) -> None:
         self.start()
         assert self.proc and self.proc.stdin and self.proc.stdout
         try:
             self._drain_pending_stdout()
+            self._pending_turn = True
             self.proc.stdin.write(
                 json.dumps({"event": "user", "message": {"content": f"{self.system_prompt}\n\nBalas satu kata saja: Siap."}}) + "\n"
             )
@@ -655,39 +789,75 @@ class AgySession:
                 except json.JSONDecodeError:
                     continue
                 if ev.get("event") == "result":
+                    self._pending_turn = False
                     self.first_turn = False
                     break
         except Exception:
             self.close()
             raise
 
-    def ask(self, text: str, notes_context: str = "", timeout_s: float = 45.0) -> str:
+    def ask_stream(
+        self,
+        text: str,
+        notes_context: str = "",
+        timeout_s: float = 45.0,
+        on_delta=None,
+        cancel_event: threading.Event | None = None,
+    ) -> str:
+        """Send a turn to agy, invoking on_delta for streamed agent_response text_delta events."""
+        if cancel_event is not None and cancel_event.is_set():
+            raise TurnCancelledError("turn cancelled")
         self.start()
+        if self._pending_turn:
+            self._drain_pending_turn(timeout_s=min(timeout_s, 10.0))
+            self.start()
         assert self.proc and self.proc.stdin and self.proc.stdout
         try:
             self._drain_pending_stdout()
             content = build_agy_prompt(self.system_prompt, self.first_turn, text, notes_context)
             self.first_turn = False
+            self._pending_turn = True
             self.proc.stdin.write(json.dumps({"event": "user", "message": {"content": content}}) + "\n")
             self.proc.stdin.flush()
+            streamed_parts: list[str] = []
             while True:
-                line = self._read_line_with_timeout(timeout_s)
+                line = self._read_line_with_timeout(timeout_s, cancel_event=cancel_event)
                 if not line:
                     raise RuntimeError("agy stream closed unexpectedly")
                 try:
                     ev = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if ev.get("event") == "result":
+                ev_type = ev.get("event")
+                if ev_type == "step_update":
+                    su = ev.get("step_update") or {}
+                    if su.get("step_type") == "agent_response":
+                        delta = su.get("text_delta")
+                        if isinstance(delta, str) and delta:
+                            streamed_parts.append(delta)
+                            if on_delta is not None:
+                                on_delta(delta)
+                elif ev_type == "result":
+                    self._pending_turn = False
                     res = ev.get("result") or {}
                     if res.get("status") == "ERROR":
                         raise RuntimeError(res.get("error") or "agy turn error")
-                    return (res.get("response") or "").strip()
+                    final_text = (res.get("response") or "").strip()
+                    if not final_text and streamed_parts:
+                        final_text = "".join(streamed_parts).strip()
+                    return final_text
+        except TurnCancelledError:
+            # Preserve the warm agy process; _pending_turn remains True so the next turn drains until result.
+            raise
         except Exception:
             self.close()
             raise
 
+    def ask(self, text: str, notes_context: str = "", timeout_s: float = 45.0) -> str:
+        return self.ask_stream(text, notes_context=notes_context, timeout_s=timeout_s)
+
     def close(self) -> None:
+        self._pending_turn = False
         if not self.proc:
             return
         try:
@@ -794,24 +964,95 @@ def speak_macos_say(text: str, out_wav: pathlib.Path, voice: str = "Damayanti", 
     )
 
 
+_STDOUT_LOCK = threading.Lock()
+_TTS_STATE_LOCK = threading.Lock()
+
+
+def _write_pcm16k_wav(pcm_bytes: bytes, out_wav: pathlib.Path, *, sample_rate: int = 16000) -> None:
+    usable = len(pcm_bytes) - (len(pcm_bytes) % 2)
+    if usable <= 0:
+        raise ElevenLabsTTSError("elevenlabs produced empty audio")
+    with wave.open(str(out_wav), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm_bytes[:usable])
+
+
 def speak_edge_tts(text: str, out_wav: pathlib.Path, voice: str, rate: int = 185, timeout: float = 12.0) -> None:
     import asyncio
     import edge_tts
 
-    tmp_mp3 = out_wav.with_suffix(".edge.mp3")
     edge_rate = rate_wpm_to_edge_percent(rate)
+    ffmpeg_cmd = [
+        _ffmpeg_bin(),
+        "-nostdin",
+        "-v",
+        "error",
+        "-y",
+        "-f",
+        "mp3",
+        "-i",
+        "pipe:0",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-c:a",
+        "pcm_s16le",
+        str(out_wav),
+    ]
+    proc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    audio_bytes = 0
 
-    async def _synthesize() -> None:
+    async def _stream_to_ffmpeg() -> None:
+        nonlocal audio_bytes
         communicate = edge_tts.Communicate(text, voice=voice, rate=edge_rate)
-        await asyncio.wait_for(communicate.save(str(tmp_mp3)), timeout=timeout)
+        assert proc.stdin is not None
+        async for message in communicate.stream():
+            if message.get("type") == "audio" and message.get("data"):
+                chunk = message["data"]
+                audio_bytes += len(chunk)
+                proc.stdin.write(chunk)
 
     try:
-        asyncio.run(_synthesize())
-        if not tmp_mp3.exists() or tmp_mp3.stat().st_size == 0:
+        asyncio.run(asyncio.wait_for(_stream_to_ffmpeg(), timeout=timeout))
+        if proc.stdin:
+            proc.stdin.close()
+            proc.stdin = None
+        if audio_bytes == 0:
             raise RuntimeError("edge-tts produced empty audio")
-        _convert_mp3_to_wav(tmp_mp3, out_wav)
+        stderr_out = proc.stderr.read() if proc.stderr else b""
+        rc = proc.wait(timeout=10.0)
+        if rc != 0:
+            err_msg = stderr_out.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(f"ffmpeg failed ({rc}): {err_msg}" if err_msg else f"ffmpeg exited {rc}")
+        if not out_wav.exists() or out_wav.stat().st_size == 0:
+            raise RuntimeError("edge-tts produced empty audio")
+    except Exception:
+        if proc.stdin:
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        out_wav.unlink(missing_ok=True)
+        raise
     finally:
-        tmp_mp3.unlink(missing_ok=True)
+        if proc.stderr:
+            try:
+                proc.stderr.close()
+            except Exception:
+                pass
+
+
+def _is_pcm_format_rejected(exc: ElevenLabsTTSError) -> bool:
+    if exc.is_quota_or_auth or exc.status_code not in (400, 403, 422):
+        return False
+    msg = str(exc).lower()
+    return any(tok in msg for tok in ("output_format", "pcm", "tier", "subscription", "not_allowed", "not allowed"))
 
 
 def speak_elevenlabs_tts(
@@ -822,6 +1063,7 @@ def speak_elevenlabs_tts(
     rate: int = 185,
     timeout: float = 12.0,
     api_key: str = "",
+    output_format: str = "pcm_16000",
 ) -> None:
     resolved_voice_id = (voice_id or "").strip()
     if not resolved_voice_id:
@@ -833,33 +1075,36 @@ def speak_elevenlabs_tts(
 
     resolved_model = (model_id or "").strip() or ELEVENLABS_DEFAULT_MODEL
     speed = rate_wpm_to_elevenlabs_speed(rate)
-    url = (
-        f"https://api.elevenlabs.io/v1/text-to-speech/"
-        f"{urllib.parse.quote(resolved_voice_id, safe='')}"
-        f"?output_format=mp3_44100_128"
-    )
-    payload = {
-        "text": text,
-        "model_id": resolved_model,
-        "language_code": "id",
-        "voice_settings": {
-            "stability": 0.5,
-            "similarity_boost": 0.75,
-            "speed": speed,
-        },
-    }
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "xi-api-key": resolved_key,
-            "Content-Type": "application/json",
-            "Accept": "audio/mpeg",
-        },
-        method="POST",
-    )
-    tmp_mp3 = out_wav.with_suffix(".eleven.mp3")
-    try:
+    payload_bytes = json.dumps(
+        {
+            "text": text,
+            "model_id": resolved_model,
+            "language_code": "id",
+            "voice_settings": {
+                "stability": 0.5,
+                "similarity_boost": 0.75,
+                "speed": speed,
+            },
+        }
+    ).encode("utf-8")
+
+    def _fetch(fmt: str) -> bytes:
+        accept = "audio/pcm" if fmt.startswith("pcm_") else "audio/mpeg"
+        url = (
+            f"https://api.elevenlabs.io/v1/text-to-speech/"
+            f"{urllib.parse.quote(resolved_voice_id, safe='')}"
+            f"?output_format={urllib.parse.quote(fmt, safe='')}"
+        )
+        req = urllib.request.Request(
+            url,
+            data=payload_bytes,
+            headers={
+                "xi-api-key": resolved_key,
+                "Content-Type": "application/json",
+                "Accept": accept,
+            },
+            method="POST",
+        )
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 audio_bytes = resp.read()
@@ -877,9 +1122,26 @@ def speak_elevenlabs_tts(
             raise ElevenLabsTTSError(f"ElevenLabs network error: {_sanitize_error(str(exc.reason), resolved_key)}") from exc
         except Exception as exc:
             raise ElevenLabsTTSError(f"ElevenLabs request failed: {_sanitize_error(str(exc), resolved_key)}") from exc
-
         if not audio_bytes:
             raise ElevenLabsTTSError("elevenlabs produced empty audio")
+        return audio_bytes
+
+    fmt = (output_format or "pcm_16000").strip()
+    if fmt.startswith("pcm_"):
+        try:
+            pcm_bytes = _fetch(fmt)
+            _write_pcm16k_wav(pcm_bytes, out_wav, sample_rate=16000)
+            return
+        except ElevenLabsTTSError as exc:
+            if not _is_pcm_format_rejected(exc):
+                raise
+            fmt = "mp3_44100_128"
+        except Exception as exc:
+            raise ElevenLabsTTSError(_sanitize_error(str(exc), resolved_key)) from exc
+
+    tmp_mp3 = out_wav.with_suffix(".eleven.mp3")
+    try:
+        audio_bytes = _fetch(fmt)
         tmp_mp3.write_bytes(audio_bytes)
         if not tmp_mp3.exists() or tmp_mp3.stat().st_size == 0:
             raise ElevenLabsTTSError("elevenlabs produced empty audio")
@@ -921,8 +1183,14 @@ def speak(
     cleaned = clean_for_tts(text) or text.strip()
     if tts_engine == "elevenlabs":
         edge_voice = voice if is_edge_neural_voice(voice) else "id-ID-GadisNeural"
-        if tts_state is not None and tts_state.get("sticky_fallback"):
-            sticky_reason = str(tts_state.get("sticky_reason") or "elevenlabs sticky quota fallback")
+        sticky_fallback = False
+        sticky_reason = ""
+        if tts_state is not None:
+            with _TTS_STATE_LOCK:
+                if tts_state.get("sticky_fallback"):
+                    sticky_fallback = True
+                    sticky_reason = str(tts_state.get("sticky_reason") or "elevenlabs sticky quota fallback")
+        if sticky_fallback:
             try:
                 speak_edge_tts(cleaned, out_wav, voice=edge_voice, rate=rate)
                 return {"engine_used": "edge", "fallback_reason": sticky_reason}
@@ -946,8 +1214,9 @@ def speak(
             reason = _sanitize_error(str(exc), elevenlabs_api_key)
             print(f"elevenlabs-tts failed ({reason}); falling back to edge-tts {edge_voice}", file=sys.stderr)
             if tts_state is not None and _is_quota_or_auth_error(exc):
-                tts_state["sticky_fallback"] = True
-                tts_state["sticky_reason"] = reason
+                with _TTS_STATE_LOCK:
+                    tts_state["sticky_fallback"] = True
+                    tts_state["sticky_reason"] = reason
             try:
                 speak_edge_tts(cleaned, out_wav, voice=edge_voice, rate=rate)
                 return {"engine_used": "edge", "fallback_reason": reason}
@@ -981,7 +1250,22 @@ def _attach_tts_metadata(out: dict, tts_meta: dict | object) -> None:
 def _emit_daemon_line(payload: dict, request_id=None) -> None:
     if request_id is not None:
         payload = {"id": request_id, **payload}
-    print(json.dumps(payload, ensure_ascii=False), flush=True)
+    line = json.dumps(payload, ensure_ascii=False)
+    with _STDOUT_LOCK:
+        print(line, flush=True)
+
+
+def _chunk_wav_path(reply_wav: pathlib.Path, index: int) -> pathlib.Path:
+    suffix = reply_wav.suffix or ".wav"
+    return reply_wav.with_name(f"{reply_wav.stem}.chunk{index}{suffix}")
+
+
+def _supports_ask_stream(agy: object) -> bool:
+    if isinstance(agy, AgySession):
+        return True
+    if "ask_stream" in getattr(agy, "__dict__", {}):
+        return callable(getattr(agy, "ask_stream"))
+    return callable(getattr(type(agy), "ask_stream", None))
 
 
 def run_turn(
@@ -1004,9 +1288,37 @@ def run_turn(
     is_follow_up: bool = False,
     recent_reply: str = "",
     elevenlabs_api_key: str = "",
+    input_format: str = "",
+    stream_audio: bool = False,
+    cancel_event: threading.Event | None = None,
+    decision_fn=None,
 ) -> dict:
     t0 = time.monotonic()
-    samples = decode_pcm16k(from_wav.resolve())
+
+    def _is_cancelled() -> bool:
+        return cancel_event is not None and cancel_event.is_set()
+
+    def _cancelled_out(heard_val: str = "", *, t_asr_val: float | None = None, include_notulen: bool = False, notulen_raw: str = "") -> dict:
+        out_c: dict = {"heard": heard_val, "reply": "", "skipped": True, "cancelled": True}
+        if t_asr_val is not None:
+            out_c["asr_s"] = round(t_asr_val - t0, 3)
+        out_c["total_s"] = round(time.monotonic() - t0, 3)
+        if include_notulen and notulen and notulen_raw:
+            out_c["notulen_line"] = notulen_raw
+        return out_c
+
+    if _is_cancelled():
+        return _cancelled_out()
+
+    resolved_from = from_wav.resolve()
+    if input_format == "pcm16k" or resolved_from.suffix.lower() == ".pcm":
+        samples = decode_raw_pcm16k(resolved_from)
+    else:
+        samples = decode_pcm16k(resolved_from)
+
+    if _is_cancelled():
+        return _cancelled_out()
+
     if require_wake:
         min_peak, min_rms, min_active_ms = WAKE_MIN_PEAK, WAKE_MIN_RMS, WAKE_MIN_ACTIVE_MS
     elif is_follow_up:
@@ -1015,17 +1327,20 @@ def run_turn(
         min_peak, min_rms, min_active_ms = 0.012, 0.0025, 0.0
     raw_heard = transcribe(whisper, samples, min_peak=min_peak, min_rms=min_rms, min_active_ms=min_active_ms)
     t_asr = time.monotonic()
+    asr_s = round(t_asr - t0, 3)
+    if _is_cancelled():
+        return _cancelled_out(t_asr_val=t_asr)
     if not raw_heard:
-        return {"heard": "", "reply": "", "skipped": True, "asr_s": round(t_asr - t0, 2)}
+        return {"heard": "", "reply": "", "skipped": True, "asr_s": asr_s}
 
     if is_follow_up and recent_reply and is_self_echo(raw_heard, recent_reply):
-        return {"heard": "", "reply": "", "skipped": True, "echo_filtered": True, "asr_s": round(t_asr - t0, 2)}
+        return {"heard": "", "reply": "", "skipped": True, "echo_filtered": True, "asr_s": asr_s}
 
     heard = raw_heard
     if require_wake:
         triggered = extract_after_wake(raw_heard)
         if not triggered:
-            out: dict = {"heard": "", "reply": "", "skipped": True, "asr_s": round(t_asr - t0, 2)}
+            out: dict = {"heard": "", "reply": "", "skipped": True, "asr_s": asr_s}
             if notulen:
                 out["notulen_line"] = raw_heard
             return out
@@ -1037,22 +1352,19 @@ def run_turn(
     reply = None
     if defer_reply:
         _emit_daemon_line({"event": "transcribed", "heard": heard}, request_id=request_id)
-        decision_line = sys.stdin.readline()
-        if not decision_line:
-            return {"heard": heard, "reply": "", "skipped": True}
-        decision = json.loads(decision_line)
-        if decision.get("action") == "cancel":
+        if decision_fn is not None:
+            decision = decision_fn()
+        else:
+            decision_line = sys.stdin.readline()
+            if not decision_line:
+                return {"heard": heard, "reply": "", "skipped": True}
+            decision = json.loads(decision_line)
+        if _is_cancelled():
+            return _cancelled_out(heard, t_asr_val=t_asr, include_notulen=True, notulen_raw=raw_heard)
+        if not decision or decision.get("action") == "cancel":
             return {"heard": heard, "reply": "", "skipped": True}
         if decision.get("action") == "answer":
             reply = str(decision.get("text") or "")
-    if reply is None:
-        reply = agy.ask(heard, notes_context=notes_context)
-    t_llm = time.monotonic()
-    if not reply:
-        out = {"heard": heard, "reply": "", "asr_s": round(t_asr - t0, 2), "llm_s": round(t_llm - t_asr, 2)}
-        if notulen:
-            out["notulen_line"] = raw_heard
-        return out
 
     speak_kwargs = {
         "voice": tts_voice,
@@ -1064,17 +1376,267 @@ def run_turn(
     }
     if elevenlabs_api_key:
         speak_kwargs["elevenlabs_api_key"] = elevenlabs_api_key
-    tts_meta = speak(reply, reply_wav.resolve(), **speak_kwargs)
-    t_tts = time.monotonic()
+
+    has_stream_api = _supports_ask_stream(agy)
+    t_llm_start = time.monotonic()
+    t_llm_first: float | None = None
+
+    if not stream_audio:
+        if reply is None:
+            try:
+                if has_stream_api and cancel_event is not None:
+                    def _mark_first(_delta: str) -> None:
+                        nonlocal t_llm_first
+                        if t_llm_first is None:
+                            t_llm_first = time.monotonic()
+
+                    reply = agy.ask_stream(heard, notes_context=notes_context, on_delta=_mark_first, cancel_event=cancel_event)
+                else:
+                    reply = agy.ask(heard, notes_context=notes_context)
+            except TurnCancelledError:
+                return _cancelled_out(heard, t_asr_val=t_asr, include_notulen=True, notulen_raw=raw_heard)
+        t_llm = time.monotonic()
+        if t_llm_first is None:
+            t_llm_first = t_llm
+        if _is_cancelled():
+            return _cancelled_out(heard, t_asr_val=t_asr, include_notulen=True, notulen_raw=raw_heard)
+        if not reply:
+            out = {
+                "heard": heard,
+                "reply": "",
+                "asr_s": asr_s,
+                "llm_first_s": round(t_llm_first - t_llm_start, 3),
+                "llm_s": round(t_llm - t_llm_start, 3),
+            }
+            if notulen:
+                out["notulen_line"] = raw_heard
+            return out
+
+        t_tts_start = time.monotonic()
+        tts_meta = speak(reply, reply_wav.resolve(), **speak_kwargs)
+        t_tts = time.monotonic()
+        tts_dur = round(t_tts - t_tts_start, 3)
+        total_dur = round(t_tts - t0, 3)
+        out = {
+            "heard": heard,
+            "reply": reply,
+            "streamed": False,
+            "chunks": 1,
+            "asr_s": asr_s,
+            "llm_first_s": round(t_llm_first - t_llm_start, 3),
+            "llm_s": round(t_llm - t_llm_start, 3),
+            "tts_first_s": tts_dur,
+            "tts_s": tts_dur,
+            "ttfa_s": total_dur,
+            "total_s": total_dur,
+        }
+        _attach_tts_metadata(out, tts_meta)
+        if notulen:
+            out["notulen_line"] = raw_heard
+        return out
+
+    # Streaming mode (stream_audio=True): synthesize and emit sentence chunks incrementally.
+    resolved_reply_wav = reply_wav.resolve()
+    state_lock = threading.Lock()
+    chunks_submitted: list[dict] = []
+    next_to_emit = 0
+    llm_done = False
+    emitted_count = 0
+    chosen_meta: dict | None = None
+    t_tts_start: float | None = None
+    t_tts_first: float | None = None
+    t_tts_end: float | None = None
+    pending_buf = ""
+    streamed_raw_parts: list[str] = []
+
+    def _try_emit_ready() -> None:
+        nonlocal next_to_emit, emitted_count, chosen_meta, t_tts_first
+        while next_to_emit < len(chunks_submitted):
+            item = chunks_submitted[next_to_emit]
+            if not item["done"] or item["error"] is not None or _is_cancelled():
+                break
+            is_final = llm_done and (next_to_emit == len(chunks_submitted) - 1)
+            _emit_daemon_line(
+                {
+                    "event": "audio_chunk",
+                    "index": item["index"],
+                    "wav": str(item["wav"]),
+                    "text": item["text"],
+                    "final": is_final,
+                },
+                request_id=request_id,
+            )
+            if item["index"] == 0 and t_tts_first is None:
+                t_tts_first = item["done_at"]
+            emitted_count += 1
+            meta = item["meta"]
+            if isinstance(meta, dict):
+                if chosen_meta is None or (meta.get("fallback_reason") and not chosen_meta.get("fallback_reason")):
+                    chosen_meta = meta
+            next_to_emit += 1
+
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    cancelled_mid_turn = False
+    try:
+        def _synth_one(item_ref: dict) -> None:
+            nonlocal t_tts_end
+            if _is_cancelled():
+                return
+            try:
+                meta = speak(item_ref["text"], item_ref["wav"], **speak_kwargs)
+                now = time.monotonic()
+                with state_lock:
+                    if _is_cancelled():
+                        item_ref["wav"].unlink(missing_ok=True)
+                        item_ref["done"] = True
+                        item_ref["done_at"] = now
+                        return
+                    item_ref["meta"] = meta
+                    item_ref["done_at"] = now
+                    item_ref["done"] = True
+                    t_tts_end = now
+                    _try_emit_ready()
+            except Exception as exc:
+                now = time.monotonic()
+                with state_lock:
+                    item_ref["error"] = exc
+                    item_ref["done_at"] = now
+                    item_ref["done"] = True
+
+        def _submit_sentence(sentence: str) -> None:
+            nonlocal t_tts_start
+            cleaned_sentence = sentence.strip()
+            if not cleaned_sentence or not (clean_for_tts(cleaned_sentence) or cleaned_sentence):
+                return
+            with state_lock:
+                if _is_cancelled():
+                    return
+                idx = len(chunks_submitted)
+                chunk_wav = _chunk_wav_path(resolved_reply_wav, idx)
+                if t_tts_start is None:
+                    t_tts_start = time.monotonic()
+                item = {
+                    "index": idx,
+                    "text": cleaned_sentence,
+                    "wav": chunk_wav,
+                    "done": False,
+                    "done_at": 0.0,
+                    "meta": None,
+                    "error": None,
+                    "future": None,
+                }
+                chunks_submitted.append(item)
+                item["future"] = executor.submit(_synth_one, item)
+
+        if reply is not None:
+            t_llm_end = t_llm_start
+            t_llm_first = t_llm_start
+            sentences, _ = _extract_ready_sentences(reply, flush=True)
+            for sent in sentences:
+                _submit_sentence(sent)
+        else:
+            try:
+                if has_stream_api:
+                    def _on_delta(delta: str) -> None:
+                        nonlocal t_llm_first, pending_buf
+                        if _is_cancelled():
+                            return
+                        if t_llm_first is None:
+                            t_llm_first = time.monotonic()
+                        streamed_raw_parts.append(delta)
+                        pending_buf += delta
+                        ready, pending_buf = _extract_ready_sentences(pending_buf, flush=False)
+                        for sent in ready:
+                            _submit_sentence(sent)
+
+                    reply = agy.ask_stream(
+                        heard,
+                        notes_context=notes_context,
+                        on_delta=_on_delta,
+                        cancel_event=cancel_event,
+                    )
+                    t_llm_end = time.monotonic()
+                    if t_llm_first is None:
+                        t_llm_first = t_llm_end
+                    if not streamed_raw_parts and reply:
+                        pending_buf = reply
+                    remaining, _ = _extract_ready_sentences(pending_buf, flush=True)
+                    for sent in remaining:
+                        _submit_sentence(sent)
+                else:
+                    reply = agy.ask(heard, notes_context=notes_context)
+                    t_llm_end = time.monotonic()
+                    t_llm_first = t_llm_end
+                    if reply:
+                        sentences, _ = _extract_ready_sentences(reply, flush=True)
+                        for sent in sentences:
+                            _submit_sentence(sent)
+            except TurnCancelledError:
+                cancelled_mid_turn = True
+
+        if cancelled_mid_turn or _is_cancelled():
+            executor.shutdown(wait=False, cancel_futures=True)
+            with state_lock:
+                for item in chunks_submitted[next_to_emit:]:
+                    item["wav"].unlink(missing_ok=True)
+            return _cancelled_out(heard, t_asr_val=t_asr, include_notulen=True, notulen_raw=raw_heard)
+
+        with state_lock:
+            llm_done = True
+            _try_emit_ready()
+
+        # Wait for all submitted TTS futures while staying responsive to cancellation.
+        futures = [item["future"] for item in chunks_submitted if item["future"] is not None]
+        while futures:
+            if _is_cancelled():
+                executor.shutdown(wait=False, cancel_futures=True)
+                with state_lock:
+                    for item in chunks_submitted[next_to_emit:]:
+                        item["wav"].unlink(missing_ok=True)
+                return _cancelled_out(heard, t_asr_val=t_asr, include_notulen=True, notulen_raw=raw_heard)
+            _, pending = concurrent.futures.wait(futures, timeout=0.05)
+            futures = list(pending)
+
+        with state_lock:
+            _try_emit_ready()
+            for item in chunks_submitted:
+                if item["error"] is not None:
+                    raise item["error"]
+    finally:
+        executor.shutdown(wait=False)
+
+    t_end = time.monotonic()
+    if not reply or emitted_count == 0:
+        out = {
+            "heard": heard,
+            "reply": reply or "",
+            "streamed": False,
+            "chunks": 0,
+            "asr_s": asr_s,
+            "llm_first_s": round((t_llm_first or t_llm_end) - t_llm_start, 3),
+            "llm_s": round(t_llm_end - t_llm_start, 3),
+        }
+        if notulen:
+            out["notulen_line"] = raw_heard
+        return out
+
+    tts_first_s = round(t_tts_first - t_tts_start, 3) if (t_tts_first is not None and t_tts_start is not None) else 0.0
+    tts_s = round(t_tts_end - t_tts_start, 3) if (t_tts_end is not None and t_tts_start is not None) else 0.0
+    ttfa_s = round(t_tts_first - t0, 3) if t_tts_first is not None else round(t_end - t0, 3)
     out = {
         "heard": heard,
         "reply": reply,
-        "asr_s": round(t_asr - t0, 2),
-        "llm_s": round(t_llm - t_asr, 2),
-        "tts_s": round(t_tts - t_llm, 2),
-        "total_s": round(t_tts - t0, 2),
+        "streamed": True,
+        "chunks": emitted_count,
+        "asr_s": asr_s,
+        "llm_first_s": round((t_llm_first or t_llm_end) - t_llm_start, 3),
+        "llm_s": round(t_llm_end - t_llm_start, 3),
+        "tts_first_s": tts_first_s,
+        "tts_s": tts_s,
+        "ttfa_s": ttfa_s,
+        "total_s": round(t_end - t0, 3),
     }
-    _attach_tts_metadata(out, tts_meta)
+    _attach_tts_metadata(out, chosen_meta)
     if notulen:
         out["notulen_line"] = raw_heard
     return out
@@ -1085,15 +1647,79 @@ def _run_agy_daemon(whisper: WhisperModel, agy: AgySession, args: argparse.Names
     _emit_daemon_line({"ready": True})
     daemon_tts_state: dict = {"sticky_fallback": False, "sticky_reason": ""}
     cached_elevenlabs_key = get_elevenlabs_api_key() if args.tts_engine == "elevenlabs" else ""
+
+    request_queue: queue.Queue = queue.Queue()
+    control_lock = threading.Lock()
+    decisions_by_id: dict[object, queue.Queue] = {}
+    cancel_events_by_id: dict[object, threading.Event] = {}
+    active_cancel_event: threading.Event | None = None
+
+    def _get_decision_queue_locked(req_key) -> queue.Queue:
+        q = decisions_by_id.get(req_key)
+        if q is None:
+            q = queue.Queue()
+            decisions_by_id[req_key] = q
+        return q
+
+    def _stdin_reader() -> None:
+        try:
+            while True:
+                raw = sys.stdin.readline()
+                if not raw:
+                    break
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    msg = json.loads(raw)
+                except json.JSONDecodeError as exc:
+                    request_queue.put({"__parse_error__": str(exc)})
+                    continue
+                action = msg.get("action")
+                msg_id = msg.get("id")
+                if action in ("continue", "answer"):
+                    with control_lock:
+                        _get_decision_queue_locked(msg_id).put(msg)
+                elif action == "cancel":
+                    with control_lock:
+                        ev = cancel_events_by_id.get(msg_id)
+                        if ev is not None:
+                            ev.set()
+                        elif msg_id is None and active_cancel_event is not None:
+                            active_cancel_event.set()
+                        q = decisions_by_id.get(msg_id)
+                        if q is not None:
+                            q.put(msg)
+                else:
+                    with control_lock:
+                        if msg_id not in cancel_events_by_id:
+                            cancel_events_by_id[msg_id] = threading.Event()
+                        _get_decision_queue_locked(msg_id)
+                    request_queue.put(msg)
+        finally:
+            with control_lock:
+                for q in decisions_by_id.values():
+                    q.put(None)
+            request_queue.put(None)
+
+    reader_thread = threading.Thread(target=_stdin_reader, name="agy-stdin-reader", daemon=True)
+    reader_thread.start()
+
     while True:
-        raw = sys.stdin.readline()
-        if not raw:
+        req = request_queue.get()
+        if req is None:
             break
-        raw = raw.strip()
-        if not raw:
+        if "__parse_error__" in req:
+            _emit_daemon_line({"error": req["__parse_error__"], "heard": "", "reply": ""})
             continue
-        req = json.loads(raw)
         req_id = req.get("id")
+        with control_lock:
+            cancel_ev = cancel_events_by_id.get(req_id)
+            if cancel_ev is None:
+                cancel_ev = threading.Event()
+                cancel_events_by_id[req_id] = cancel_ev
+            decision_q = _get_decision_queue_locked(req_id)
+            active_cancel_event = cancel_ev
         try:
             req_tts_engine = str(req.get("tts_engine", args.tts_engine))
             req_elevenlabs_voice_id = str(req.get("elevenlabs_voice_id", args.elevenlabs_voice_id))
@@ -1118,9 +1744,11 @@ def _run_agy_daemon(whisper: WhisperModel, agy: AgySession, args: argparse.Names
                 )
                 out: dict = {"spoken": True}
                 _attach_tts_metadata(out, tts_meta)
-            elif req.get("action") == "cancel":
-                continue
             else:
+                def _wait_decision() -> dict:
+                    item = decision_q.get()
+                    return item if item is not None else {"action": "cancel"}
+
                 turn_kwargs = {
                     "require_wake": bool(req.get("require_wake", False)),
                     "notify_wake": True,
@@ -1136,6 +1764,10 @@ def _run_agy_daemon(whisper: WhisperModel, agy: AgySession, args: argparse.Names
                     "request_id": req_id,
                     "is_follow_up": bool(req.get("is_follow_up", False)),
                     "recent_reply": str(req.get("recent_reply") or ""),
+                    "input_format": str(req.get("input_format") or ""),
+                    "stream_audio": bool(req.get("stream_audio", False)),
+                    "cancel_event": cancel_ev,
+                    "decision_fn": _wait_decision,
                 }
                 if cached_elevenlabs_key:
                     turn_kwargs["elevenlabs_api_key"] = cached_elevenlabs_key
@@ -1148,6 +1780,12 @@ def _run_agy_daemon(whisper: WhisperModel, agy: AgySession, args: argparse.Names
                 )
         except Exception as exc:
             out = {"error": _sanitize_error(str(exc)), "heard": "", "reply": ""}
+        finally:
+            with control_lock:
+                if active_cancel_event is cancel_ev:
+                    active_cancel_event = None
+                cancel_events_by_id.pop(req_id, None)
+                decisions_by_id.pop(req_id, None)
         _emit_daemon_line(out, request_id=req_id)
     return 0
 

@@ -210,6 +210,7 @@ function createMediaSandbox({
   const createdMediaStreamSources = [];
   const createdScriptProcessors = [];
   const createdPeers = [];
+  const createdBufferSources = [];
 
   class FakeGainNode {
     constructor() { this.gain = {value: 1}; this.disconnected = false; createdGains.push(this); }
@@ -282,6 +283,8 @@ function createMediaSandbox({
   class FakeAudioBuffer {
     constructor({length, sampleRate}) {
       this.length = length;
+      this.sampleRate = sampleRate;
+      this.numberOfChannels = 1;
       this.duration = length / sampleRate;
       this.data = new Float32Array(length);
     }
@@ -293,6 +296,7 @@ function createMediaSandbox({
       this.buffer = null;
       this.onended = null;
       this.offset = {value: 0};
+      createdBufferSources.push(this);
     }
     connect() { return this; }
     disconnect() {}
@@ -506,6 +510,7 @@ function createMediaSandbox({
     createdMediaStreamSources,
     createdScriptProcessors,
     createdPeers,
+    createdBufferSources,
     makeFakeTrack,
     getDataChannel: () => createdDataChannel,
   };
@@ -1130,4 +1135,30 @@ test('meet-media.cjs codexWaitUserSpeech rejects steady room noise and single cl
   assert.equal(clickHumRes.spoke, false, 'Expected click + weak hum not to trigger spoke: true');
   assert.equal(clickHumSandbox.createdGains[3].gain.value, 0);
   clickHumSandbox.api.codexDisconnect();
+});
+
+test('captured PCM is replayed in full with trailing silence and no live audio', async () => {
+  const sandbox = createMediaSandbox({sampleProvider: () => new Float32Array(256)});
+  await sandbox.api.codexConnect();
+  const pcm = Buffer.alloc(8);
+  [32767, -32768, 1234, -1234].forEach((sample, index) => pcm.writeInt16LE(sample, index * 2));
+  const result = await sandbox.api.codexPlayCapturedAudio(pcm.toString('base64'), 'pcm16k');
+  assert.equal(result.spoke, true);
+  const source = sandbox.createdBufferSources.at(-1);
+  assert.equal(source.buffer.sampleRate, 16000);
+  assert.equal(source.buffer.length, 4 + 11200);
+  assert.deepEqual(Array.from(source.buffer.data.slice(0, 4)), [32767 / 32768, -1, 1234 / 32768, -1234 / 32768]);
+  assert.ok(source.buffer.data.slice(4).every(sample => sample === 0));
+  sandbox.api.codexDisconnect();
+});
+
+test('cancelling a captured audio replay stops it and closes the turn', async () => {
+  const sandbox = createMediaSandbox({sampleProvider: () => new Float32Array(256)});
+  await sandbox.api.codexConnect();
+  const playback = sandbox.api.codexPlayCapturedAudio(Buffer.from([1, 0, 2, 0]).toString('base64'), 'pcm16k');
+  sandbox.api.codexCancelAndClear();
+  const result = await playback;
+  assert.equal(result.aborted, true);
+  assert.equal(result.spoke, false);
+  sandbox.api.codexDisconnect();
 });

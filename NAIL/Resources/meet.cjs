@@ -1,8 +1,8 @@
 const electron = process.versions.electron ? require('electron') : {};
 const { app, BrowserWindow } = electron;
-const { existsSync, mkdirSync, appendFileSync, writeFileSync } = require('node:fs');
-const { appendFile, mkdtemp, readFile, rm, writeFile, stat } = require('node:fs/promises');
-const { dirname, join } = require('node:path');
+const { existsSync, mkdirSync, appendFileSync, writeFileSync, realpathSync } = require('node:fs');
+const { appendFile, mkdtemp, readFile, rm, unlink, writeFile, stat } = require('node:fs/promises');
+const { basename, dirname, join, resolve, sep } = require('node:path');
 const { homedir, tmpdir } = require('node:os');
 const { execFile, spawn } = require('node:child_process');
 const { promisify } = require('node:util');
@@ -752,22 +752,35 @@ function createAgyDaemonClient({spawnWorker = spawn, pipeline, runtimeConfig = {
     onExit();
   }
 
-  async function runTurn(payload, {signal, onWake, onTranscribed} = {}) {
+  async function runTurn(payload, {signal, onWake, onTranscribed, onAudioChunk} = {}) {
     if (signal?.aborted) throw signal.reason ?? new Error('voice-interrupted');
     await start();
     if (signal?.aborted) throw signal.reason ?? new Error('voice-interrupted');
     if (!daemon?.stdin?.writable) throw new Error('agy daemon exited');
 
     const reqId = ++nextId;
-    const entry = {id: reqId, queue: [], waiter: null, aborted: false, awaitingDecision: false, closedError: null};
+    const entry = {
+      id: reqId,
+      queue: [],
+      waiter: null,
+      aborted: false,
+      written: false,
+      cancelSent: false,
+      awaitingDecision: false,
+      closedError: null,
+    };
     inFlight.set(reqId, entry);
+
+    const sendCancel = () => {
+      if (entry.cancelSent || !entry.written || !daemon?.stdin?.writable) return;
+      entry.cancelSent = true;
+      try { daemon.stdin.write(`${JSON.stringify({id: reqId, action: 'cancel'})}\n`); } catch {}
+    };
 
     const onAbort = () => {
       entry.aborted = true;
-      if (entry.awaitingDecision && daemon?.stdin?.writable) {
-        entry.awaitingDecision = false;
-        try { daemon.stdin.write(`${JSON.stringify({id: reqId, action: 'cancel'})}\n`); } catch {}
-      }
+      entry.awaitingDecision = false;
+      sendCancel();
       if (entry.waiter) {
         const w = entry.waiter;
         entry.waiter = null;
@@ -789,6 +802,7 @@ function createAgyDaemonClient({spawnWorker = spawn, pipeline, runtimeConfig = {
 
     try {
       daemon.stdin.write(`${JSON.stringify({...payload, id: reqId})}\n`);
+      entry.written = true;
       while (true) {
         const msg = await nextForReq();
         if (msg.event === 'wake') {
@@ -804,11 +818,18 @@ function createAgyDaemonClient({spawnWorker = spawn, pipeline, runtimeConfig = {
             entry.awaitingDecision = false;
           }
           if (signal?.aborted || entry.aborted) {
-            try { daemon?.stdin?.writable && daemon.stdin.write(`${JSON.stringify({id: reqId, action: 'cancel'})}\n`); } catch {}
+            sendCancel();
             throw signal?.reason ?? new Error('voice-interrupted');
           }
           if (!daemon?.stdin?.writable) throw new Error('agy daemon exited');
           daemon.stdin.write(`${JSON.stringify({...decision, id: reqId})}\n`);
+          continue;
+        }
+        if (msg.event === 'audio_chunk') {
+          await onAudioChunk?.(msg);
+          if (signal?.aborted || entry.aborted) {
+            throw signal?.reason ?? new Error('voice-interrupted');
+          }
           continue;
         }
         return msg;
@@ -910,6 +931,7 @@ function buildLatencyLogEntry(input = {}) {
     mode: input.mode ?? 'manual',
     vadSilenceMs: pickMs('vadSilenceMs'),
     captureToWorkerMs: pickMs('captureToWorkerMs'),
+    ...(pickMs('detectionMs') !== null ? {detectionMs: pickMs('detectionMs')} : {}),
     whisperMs: pickMs('whisperMs'),
     notesSyncMs: pickMs('notesSyncMs'),
     unmuteMs: pickMs('unmuteMs'),
@@ -944,6 +966,7 @@ function buildWakeDiagEntry(input = {}) {
     triggered: Boolean(input.triggered),
     raw: typeof input.raw === 'string' ? input.raw : String(input.raw ?? ''),
     prompt: typeof input.prompt === 'string' ? input.prompt : String(input.prompt ?? ''),
+    ...(toNullableMs(input.detectionMs) !== null ? {detectionMs: toNullableMs(input.detectionMs)} : {}),
     whisperMs: toNullableMs(input.whisperMs),
     durationMs: toNullableMs(input.durationMs),
     pcmMode: Boolean(input.pcmMode),
@@ -1099,6 +1122,7 @@ async function captureCodexHandsFreeWake(wc, work, {
     const wakePromise = checkCodexWake(pcmPath, 'wake', {format: 'pcm16k'});
     return {
       wakePromise,
+      audio: {audioBase64: clip.pcmBase64, format: 'pcm16k'},
       workerStartedAt,
       preTimingBase: {
         vadSilenceMs: Number.isFinite(clip.silenceWaitMs) ? clip.silenceWaitMs : null,
@@ -1122,6 +1146,7 @@ async function captureCodexHandsFreeWake(wc, work, {
   const wakePromise = checkCodexWake(webmPath, 'wake');
   return {
     wakePromise,
+    audio: {audioBase64: clip, format: 'webm'},
     workerStartedAt,
     preTimingBase: {
       vadSilenceMs: null,
@@ -1178,6 +1203,7 @@ async function executeCodexHandsFreeTurn({
   runCodexPresentationTurn,
   runCodexTextTurn,
   runCodexLiveTurn,
+  runCodexCapturedTurn,
 } = {}) {
   setTurnInterrupted(false);
   const currentlyInStandby = Boolean(
@@ -1202,6 +1228,7 @@ async function executeCodexHandsFreeTurn({
   const isStopped = () => isStopping() || isTurnInterrupted() || isTurnRequested() || wakeAbort.signal.aborted;
   const captureStartedAt = nowFn();
   let wake = null;
+  let capturedAudio = null;
   let preTiming = null;
   try {
     const captured = await captureCodexHandsFreeWake(wc, work, {
@@ -1223,6 +1250,7 @@ async function executeCodexHandsFreeTurn({
       return;
     }
     const {wakePromise, workerStartedAt, preTimingBase} = captured;
+    capturedAudio = captured.audio;
     wakePromise
       .catch(error => { if (wakeAbort.signal.aborted) return logVoiceError(error); })
       .finally(() => { rm(work, {recursive: true, force: true}).catch(() => {}); });
@@ -1241,17 +1269,19 @@ async function executeCodexHandsFreeTurn({
     if (wake) {
       const whisperMs = Number.isFinite(wake.whisperMs)
         ? wake.whisperMs
-        : Math.max(0, nowFn() - workerStartedAt);
+        : null;
       preTiming = {
         ...preTimingBase,
         whisperMs,
+        ...(Number.isFinite(wake.detectionMs) ? {detectionMs: wake.detectionMs} : {}),
       };
-      if ((wake.raw && String(wake.raw).trim()) || (preTimingBase?.durationMs ?? 0) >= 300) {
+      if (wake.triggered || (wake.raw && String(wake.raw).trim()) || (preTimingBase?.durationMs ?? 0) >= 300) {
         appendWakeDiagLogFn({
           triggered: Boolean(wake.triggered),
           raw: wake.raw ?? '',
           prompt: wake.prompt ?? '',
           whisperMs: preTiming?.whisperMs ?? null,
+          ...(preTiming?.detectionMs != null ? {detectionMs: preTiming.detectionMs} : {}),
           durationMs: preTimingBase?.durationMs ?? null,
           pcmMode: Boolean(preTimingBase?.pcmMode),
         });
@@ -1274,6 +1304,10 @@ async function executeCodexHandsFreeTurn({
   setInStandby(false);
   if (standbyState && typeof standbyState === 'object') standbyState.inStandby = false;
   emit(`voice-wake ${JSON.stringify({heard: wake.prompt || wake.raw || 'Nail'})}`);
+  if (runCodexCapturedTurn) {
+    await runCodexCapturedTurn(wc, read, click, capturedAudio, {mode: 'hands-free', preTiming});
+    return;
+  }
   if (wake.has_query && wake.prompt) {
     if (shouldReadPresentation(platform, presentationReadingEnabled, wake.prompt)) {
       await runCodexPresentationTurn(wc, read, click, wake.prompt, {mode: 'presentation', preTiming});
@@ -1438,6 +1472,291 @@ async function executeCodexTurnWithFollowUp({
   }
 }
 
+async function captureAntigravityAudio(wc, auto, idleMs, silenceMs = 450) {
+  let clip = await wc.executeJavaScript(
+    `typeof window.__nailMedia?.recordPcm16k === 'function' ? window.__nailMedia.recordPcm16k(8000, ${Boolean(auto)}, ${idleMs}, ${silenceMs}) : window.__nailMedia.record(8000, ${Boolean(auto)}, ${idleMs})`,
+    true
+  );
+  if (clip === undefined) {
+    clip = await wc.executeJavaScript(`window.__nailMedia.record(8000, ${Boolean(auto)}, ${idleMs})`, true);
+  }
+  return clip;
+}
+
+async function executeAntigravityTurn({
+  wc,
+  work,
+  read,
+  click,
+  manual = false,
+  isFollowUp = false,
+  clip,
+  heardAtMs,
+  agyClient,
+  meetingNotes,
+  agySyncedNoteCursor = 0,
+  lastSpokenReply = {text: '', at: 0},
+  listeningMode = 'standby',
+  platform = 'meet',
+  presentationReadingEnabled = false,
+  presentationAnswer,
+  unmuteAndVerifyMicFn,
+  restoreMeetMuteFn,
+  emit = () => {},
+  appendTeamsLog = () => {},
+  logVoiceError = async () => {},
+  readDiag = async () => null,
+  onSyncNoteCursor = () => {},
+  onLastSpokenReply = () => {},
+  onFollowUp = () => {},
+  onActivePresentationAbort = () => {},
+  signal,
+  isStopping = () => false,
+  isTurnInterrupted = () => false,
+  delayFn = delay,
+} = {}) {
+  const isPcm = Boolean(clip && typeof clip === 'object' && typeof clip.pcmBase64 === 'string');
+  let inputPath;
+  let inputFormat;
+  let audioBytes;
+  if (isPcm) {
+    if (!clip.pcmBase64 || clip.pcmBase64.length > 1_500_000) throw new Error('Invalid audio');
+    inputPath = join(work, 'meeting.pcm');
+    inputFormat = 'pcm16k';
+    audioBytes = Buffer.from(clip.pcmBase64, 'base64');
+  } else {
+    if (typeof clip !== 'string' || !clip || clip.length > 512_000) throw new Error('Invalid audio');
+    inputPath = join(work, 'meeting.webm');
+    inputFormat = undefined;
+    audioBytes = Buffer.from(clip, 'base64');
+  }
+
+  const outputPath = join(work, 'reply.wav');
+  const micState = {restoreMute: false};
+  const unmuteAbort = new AbortController();
+  const turnInnerAbort = new AbortController();
+  let sentVoiceSending = false;
+  let noMic = false;
+  let streamedChunks = 0;
+  let replyAtMs = 0;
+  const isAborted = () => Boolean(
+    isStopping() || isTurnInterrupted() || signal?.aborted || turnInnerAbort.signal.aborted
+  );
+  const onOuterAbort = () => {
+    const reason = signal?.reason ?? new Error('voice-interrupted');
+    unmuteAbort.abort(reason);
+    turnInnerAbort.abort(reason);
+    if (sentVoiceSending) {
+      wc?.executeJavaScript?.('window.__nailMedia?.stopPlay?.()')?.catch?.(() => {});
+    }
+  };
+  if (signal?.aborted) onOuterAbort();
+  else signal?.addEventListener('abort', onOuterAbort, {once: true});
+
+  let unmutePromise = null;
+  const startUnmute = () => {
+    if (!unmutePromise) {
+      unmutePromise = unmuteAndVerifyMicFn(wc, read, click, micState, unmuteAbort.signal);
+    }
+    return unmutePromise;
+  };
+
+  try {
+    if (manual || isFollowUp) {
+      startUnmute();
+    }
+
+    await writeFile(inputPath, audioBytes, {mode: 0o600});
+    await agyClient.ensureReady();
+    if (isAborted()) return {status: 'aborted'};
+
+    const notesPayload = agySyncedNoteCursor === 0
+      ? {text: meetingNotes.buildSnapshot(8000), nextCursor: meetingNotes.latestCursor()}
+      : meetingNotes.drainDelta(agySyncedNoteCursor, 4000, {excludeKinds: ['command', 'reply']});
+    const recentReply = lastSpokenReply.text && Date.now() - lastSpokenReply.at < 8000 ? lastSpokenReply.text : '';
+    const requireWake = !manual && !isFollowUp;
+    const wantNotulen = listeningMode === 'notulen';
+    const workRoot = resolve(work);
+    let realWorkRoot = workRoot;
+    try { realWorkRoot = realpathSync(workRoot); } catch {}
+    const safeChunkPath = rawPath => {
+      if (typeof rawPath !== 'string' || !rawPath) return null;
+      const resolved = resolve(rawPath);
+      let candidate = resolved;
+      try {
+        candidate = join(realpathSync(dirname(resolved)), basename(resolved));
+      } catch {}
+      return candidate.startsWith(realWorkRoot + sep) || candidate.startsWith(workRoot + sep)
+        ? candidate
+        : null;
+    };
+
+    const result = await agyClient.runTurn({
+      from_wav: inputPath,
+      ...(inputFormat ? {input_format: inputFormat} : {}),
+      reply_wav: outputPath,
+      stream_audio: true,
+      require_wake: requireWake,
+      is_follow_up: Boolean(isFollowUp && !manual),
+      recent_reply: recentReply,
+      notulen: wantNotulen,
+      notes_context: notesPayload.text,
+      defer_reply: platform === 'meet' && presentationReadingEnabled,
+    }, {
+      signal: turnInnerAbort.signal,
+      onWake: msg => {
+        if (!isAborted()) {
+          startUnmute();
+          emit(`voice-wake ${JSON.stringify({heard: msg.heard ?? ''})}`);
+        }
+      },
+      onTranscribed: async msg => {
+        const question = String(msg.heard || '');
+        let decision = {action: isAborted() ? 'cancel' : 'continue'};
+        if (!isAborted() && shouldReadPresentation(platform, presentationReadingEnabled, question)) {
+          const controller = new AbortController();
+          onActivePresentationAbort(controller);
+          const onStopPres = () => controller.abort();
+          turnInnerAbort.signal.addEventListener('abort', onStopPres, {once: true});
+          try {
+            const answer = await presentationAnswer(wc, question, controller.signal);
+            decision = {action: 'answer', text: answer};
+          } catch {
+            decision = {action: 'cancel'};
+          } finally {
+            turnInnerAbort.signal.removeEventListener('abort', onStopPres);
+            onActivePresentationAbort(null, controller);
+          }
+        }
+        return decision;
+      },
+      onAudioChunk: async msg => {
+        const chunkPath = safeChunkPath(msg?.wav);
+        try {
+          if (!chunkPath || isAborted() || noMic) return;
+          const chunkBuf = await readFile(chunkPath);
+          if (isAborted() || noMic) return;
+          if (!chunkBuf.length || chunkBuf.length > 2_000_000) throw new Error('Invalid reply audio');
+          const micReady = await startUnmute();
+          if (isAborted()) return;
+          if (!micReady) {
+            noMic = true;
+            emit('voice-no-mic');
+            turnInnerAbort.abort(new Error('voice-no-mic'));
+            return;
+          }
+          const b64 = chunkBuf.toString('base64');
+          if (b64.length > 2_700_000) throw new Error('Invalid reply audio');
+          if (!sentVoiceSending) {
+            sentVoiceSending = true;
+            replyAtMs = Date.now();
+            emit('voice-sending');
+          }
+          streamedChunks++;
+          await wc.executeJavaScript(
+            `typeof window.__nailMedia?.playChunk === 'function' ? window.__nailMedia.playChunk(${JSON.stringify(b64)}) : window.__nailMedia.play(${JSON.stringify(b64)})`,
+            true
+          );
+        } finally {
+          if (chunkPath) await unlink(chunkPath).catch(() => {});
+        }
+      },
+    });
+
+    if (noMic) return {status: 'no-mic'};
+    if (isAborted()) return {status: 'aborted'};
+    if (result.error) throw new Error(result.error);
+    if (result.skipped) {
+      unmuteAbort.abort();
+      if (isFollowUp && !manual) onFollowUp(0);
+      if (result.notulen_line && listeningMode === 'notulen') {
+        meetingNotes.addEntry({text: result.notulen_line, timestampMs: heardAtMs, kind: 'meeting'});
+        emit(`voice-notulen ${JSON.stringify({text: result.notulen_line})}`);
+      }
+      return {status: 'skipped', result};
+    }
+    if (result.heard) onSyncNoteCursor(notesPayload.nextCursor);
+    if (!result.reply) {
+      unmuteAbort.abort();
+      if (isFollowUp && !manual) onFollowUp(0);
+      if (manual) {
+        const diag = (await readDiag()) ?? {};
+        await logVoiceError(new Error(`voice-no-audio: ${JSON.stringify(diag)}`));
+        emit(`voice-no-audio ${JSON.stringify(diag)}`);
+      }
+      return {status: 'no-reply', result};
+    }
+
+    if (streamedChunks > 0) {
+      await wc.executeJavaScript('window.__nailMedia?.waitPlayback?.()', true);
+    } else {
+      const micReady = await startUnmute();
+      if (isAborted()) return {status: 'aborted'};
+      if (!micReady) {
+        emit('voice-no-mic');
+        return {status: 'no-mic'};
+      }
+      if ((await stat(outputPath)).size > 2_000_000) throw new Error('Reply audio too large');
+      const audio = (await readFile(outputPath)).toString('base64');
+      if (!audio || audio.length > 2_700_000) throw new Error('Invalid reply audio');
+      if (isAborted()) return {status: 'aborted'};
+      if (!sentVoiceSending) {
+        sentVoiceSending = true;
+        replyAtMs = Date.now();
+        emit('voice-sending');
+      }
+      await wc.executeJavaScript(`__nailMedia.play(${JSON.stringify(audio)})`, true);
+    }
+
+    if (isAborted()) return {status: 'aborted'};
+
+    const effectiveReplyAtMs = replyAtMs || Date.now();
+    const latencyMs = Math.max(0, effectiveReplyAtMs - heardAtMs);
+    if (platform === 'teams') {
+      const outDiag = await wc.executeJavaScript('window.__nailMedia?.micOutDiag?.()', true).catch(() => null);
+      appendTeamsLog(
+        `TURN_END provider=antigravity latencyMs=${latencyMs} replyLen=${(result.reply || '').length} streamed=${streamedChunks} out=${JSON.stringify(outDiag)}`
+      );
+    }
+    onLastSpokenReply({text: result.reply || '', at: Date.now()});
+    meetingNotes.addExchange({
+      heard: result.notulen_line || result.heard,
+      reply: result.reply,
+      heardAtMs,
+      replyAtMs: effectiveReplyAtMs,
+    });
+    emit(`voice-result ${JSON.stringify({
+      heard: result.heard,
+      reply: result.reply,
+      heardAtMs,
+      replyAtMs: effectiveReplyAtMs,
+      latencyMs,
+    })}`);
+    onFollowUp(Date.now() + 3000);
+    emit('voice-followup');
+    await delayFn(350);
+    return {status: 'completed', result, latencyMs, streamedChunks};
+  } catch (error) {
+    if (noMic || error?.message === 'voice-no-mic') {
+      return {status: 'no-mic'};
+    }
+    if (isAborted() || error?.message === 'voice-interrupted' || error?.message === 'manual-preempt' || error?.name === 'AbortError') {
+      if (sentVoiceSending) {
+        wc.executeJavaScript?.('window.__nailMedia?.stopPlay?.()')?.catch?.(() => {});
+      }
+      return {status: 'aborted'};
+    }
+    throw error;
+  } finally {
+    signal?.removeEventListener('abort', onOuterAbort);
+    unmuteAbort.abort();
+    if (unmutePromise) {
+      await Promise.race([unmutePromise.catch(() => {}), delay(1500)]).catch(() => {});
+    }
+    await restoreMeetMuteFn?.(wc, read, click, micState.restoreMute);
+  }
+}
+
 if (process.versions.electron) {
   const [target, profile, provider, pipeline] = process.argv.slice(2);
   const login = target === '--login';
@@ -1582,16 +1901,13 @@ if (process.versions.electron) {
       return Promise.reject(new Error('codex wake daemon unavailable'));
     }
     if (codexWakeReady) return codexWakeReady;
-    const configuredModel = resolveCodexWakeWhisperModel(runtimeConfig);
-    const spawnWakeWorker = modelName => {
+    const spawnWakeWorker = () => {
       if (stopping) {
         return Promise.reject(new Error('codex wake daemon unavailable'));
       }
       const env = {...process.env, PATH: `/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/.local/bin:${process.env.PATH ?? '/usr/bin:/bin'}`};
       const worker = spawn('/opt/homebrew/bin/uv', [
-        'run', '--offline', '--script', join(__dirname, 'agy-voice.py'),
-        '--transcribe-daemon', '--whisper-model', modelName,
-        '--cpu-threads', '4',
+        'run', '--offline', '--script', join(__dirname, 'nail-wake.py'),
       ], {env, stdio: ['pipe', 'pipe', 'ignore'], detached: process.platform !== 'win32'});
       codexWakeWorker = worker;
       const lines = createInterface({input: worker.stdout, terminal: false});
@@ -1662,13 +1978,10 @@ if (process.versions.electron) {
         }
         try { worker.stdin.end(); } catch {}
         try { worker.kill(); } catch {}
-        if (modelName !== 'base' && !stopping) {
-          return spawnWakeWorker('base');
-        }
         throw error;
       });
     };
-    const readyPromise = spawnWakeWorker(configuredModel).catch(error => {
+    const readyPromise = spawnWakeWorker().catch(error => {
       codexWakeFailed = true;
       stopCodexWakeDaemon();
       if (codexHandsFree && !stopping && !codexWakeUnavailableEmitted) {
@@ -1964,7 +2277,7 @@ if (process.versions.electron) {
         activeWc?.executeJavaScript('window.__nailMedia?.codexAbortSpeech?.()').catch(() => {});
       } else if (autoVoicePhase === 'processing' && autoVoiceAbort) {
         autoVoiceAbort.abort(new Error('manual-preempt'));
-        agyClient?.recycle();
+        activeWc?.executeJavaScript('window.__nailMedia?.stopPlay?.(); window.__nailMedia?.restoreTeamsSenders?.()').catch(() => {});
       } else {
         activeWc?.executeJavaScript('window.__nailUpgradeRecord?.()').then(upgraded => {
           if (upgraded) {
@@ -1975,7 +2288,7 @@ if (process.versions.electron) {
             }
           } else if (turnRequested && autoVoicePhase === 'processing' && autoVoiceAbort) {
             autoVoiceAbort.abort(new Error('manual-preempt'));
-            agyClient?.recycle();
+            activeWc?.executeJavaScript('window.__nailMedia?.stopPlay?.(); window.__nailMedia?.restoreTeamsSenders?.()').catch(() => {});
           }
         }).catch(() => {});
       }
@@ -1990,7 +2303,6 @@ if (process.versions.electron) {
       autoVoiceAbort?.abort(new Error('voice-interrupted'));
       activeTurnAbort?.abort(new Error('voice-interrupted'));
       activePresentationAbort?.abort();
-      if (provider === 'antigravity' && agyClient?.isRunning) agyClient.recycle();
       codexSession?.interrupt(activeWc);
       activeWc?.executeJavaScript('window.__nailMedia?.stopPlay?.(); window.__nailAbortRecord?.(); window.__nailMedia?.restoreTeamsSenders?.()').catch(() => {});
       emit('voice-interrupted');
@@ -2363,6 +2675,11 @@ if (process.versions.electron) {
     return runCodexTurn(wc, read, click, opts => codexSession.runLiveTurn(wc, opts), {mode, preTiming});
   }
 
+  async function runCodexCapturedTurn(wc, read, click, audio, turnOpts = {}) {
+    const {mode = 'hands-free', preTiming = null} = turnOpts;
+    return runCodexTurn(wc, read, click, opts => codexSession.runCapturedTurn(wc, {...audio, preTiming, ...opts}), {mode, preTiming});
+  }
+
   async function runCodexTextTurn(wc, read, click, text, turnOpts = {}) {
     const {mode = 'hands-free', preTiming = null} = turnOpts;
     return runCodexTurn(wc, read, click, opts => codexSession.runTextTurn(wc, {text, preTiming, ...opts}), {mode, preTiming});
@@ -2419,6 +2736,7 @@ if (process.versions.electron) {
       runCodexPresentationTurn,
       runCodexTextTurn,
       runCodexLiveTurn,
+      runCodexCapturedTurn,
     });
   }
 
@@ -2450,7 +2768,9 @@ if (process.versions.electron) {
     try {
       emit(isFollowUp ? 'voice-followup' : auto ? 'voice-standby' : 'voice-recording');
       const idleMs = isFollowUp ? 3000 : 12000;
-      const clip = await wc.executeJavaScript(`__nailMedia.record(8000, ${Boolean(auto)}, ${idleMs})`, true);
+      const clip = provider === 'antigravity'
+        ? await captureAntigravityAudio(wc, auto, idleMs, 450)
+        : await wc.executeJavaScript(`__nailMedia.record(8000, ${Boolean(auto)}, ${idleMs})`, true);
       if (stopping || turnInterrupted || turnAbort.signal.aborted) return;
       const manual = !auto || turnUpgraded;
       turnUpgraded = false;
@@ -2477,79 +2797,49 @@ if (process.versions.electron) {
         emit(`voice-no-audio ${JSON.stringify(diag ?? {})}`);
         return;
       }
-      if (typeof clip !== 'string' || clip.length > 512_000) throw new Error('Invalid audio');
       const heardAtMs = Date.now();
       if (manual || isFollowUp) emit('voice-processing');
+      if (provider === 'antigravity') {
+        await executeAntigravityTurn({
+          wc,
+          work,
+          read,
+          click,
+          manual,
+          isFollowUp,
+          clip,
+          heardAtMs,
+          agyClient,
+          meetingNotes,
+          agySyncedNoteCursor,
+          lastSpokenReply,
+          listeningMode,
+          platform,
+          presentationReadingEnabled,
+          presentationAnswer,
+          unmuteAndVerifyMicFn: unmuteAndVerifyMic,
+          restoreMeetMuteFn: restoreMeetMute,
+          emit,
+          appendTeamsLog,
+          logVoiceError,
+          readDiag,
+          onSyncNoteCursor: nextCursor => { agySyncedNoteCursor = nextCursor; },
+          onLastSpokenReply: nextReply => { lastSpokenReply = nextReply; },
+          onFollowUp: nextUntil => { followUpUntil = nextUntil; },
+          onActivePresentationAbort: (nextCtrl, prevCtrl) => {
+            if (nextCtrl) activePresentationAbort = nextCtrl;
+            else if (activePresentationAbort === prevCtrl) activePresentationAbort = null;
+          },
+          signal: turnAbort.signal,
+          isStopping: () => stopping,
+          isTurnInterrupted: () => turnInterrupted,
+        });
+        return;
+      }
+      if (typeof clip !== 'string' || clip.length > 512_000) throw new Error('Invalid audio');
       let result, audio;
       const requireWake = !manual && !isFollowUp;
-      const wantNotulen = listeningMode === 'notulen';
-      if (provider === 'antigravity') {
-        await writeFile(input, Buffer.from(clip, 'base64'), {mode: 0o600});
-        await agyClient.ensureReady();
-        if (stopping || turnInterrupted || turnAbort.signal.aborted) return;
-        const notesPayload = agySyncedNoteCursor === 0
-          ? {text: meetingNotes.buildSnapshot(8000), nextCursor: meetingNotes.latestCursor()}
-          : meetingNotes.drainDelta(agySyncedNoteCursor, 4000, {excludeKinds: ['command', 'reply']});
-        const recentReply = lastSpokenReply.text && Date.now() - lastSpokenReply.at < 8000 ? lastSpokenReply.text : '';
-        result = await agyClient.runTurn({
-          from_wav: input,
-          reply_wav: output,
-          require_wake: requireWake,
-          is_follow_up: Boolean(isFollowUp && !manual),
-          recent_reply: recentReply,
-          notulen: wantNotulen,
-          notes_context: notesPayload.text,
-          defer_reply: platform === 'meet' && presentationReadingEnabled,
-        }, {
-          signal: turnAbort.signal,
-          onWake: msg => {
-            if (!turnInterrupted && !stopping && !turnAbort.signal.aborted) {
-              emit(`voice-wake ${JSON.stringify({heard: msg.heard ?? ''})}`);
-            }
-          },
-          onTranscribed: async msg => {
-            const question = String(msg.heard || '');
-            let decision = {action: stopping || turnInterrupted || turnAbort.signal.aborted ? 'cancel' : 'continue'};
-            if (!stopping && !turnInterrupted && !turnAbort.signal.aborted && shouldReadPresentation(platform, presentationReadingEnabled, question)) {
-              const controller = new AbortController();
-              activePresentationAbort = controller;
-              const onStopPres = () => controller.abort();
-              turnAbort.signal.addEventListener('abort', onStopPres, {once: true});
-              try {
-                const answer = await presentationAnswer(wc, question, controller.signal);
-                decision = {action: 'answer', text: answer};
-              } catch {
-                decision = {action: 'cancel'};
-              } finally {
-                turnAbort.signal.removeEventListener('abort', onStopPres);
-                if (activePresentationAbort === controller) activePresentationAbort = null;
-              }
-            }
-            return decision;
-          },
-        });
-        if (result.error) throw new Error(result.error);
-        if (result.skipped) {
-          if (isFollowUp && !manual) followUpUntil = 0;
-          if (result.notulen_line && listeningMode === 'notulen') {
-            meetingNotes.addEntry({text: result.notulen_line, timestampMs: heardAtMs, kind: 'meeting'});
-            emit(`voice-notulen ${JSON.stringify({text: result.notulen_line})}`);
-          }
-          return;
-        }
-        if (result.heard) agySyncedNoteCursor = notesPayload.nextCursor;
-        if (!result.reply) {
-          if (isFollowUp && !manual) followUpUntil = 0;
-          if (manual) {
-            const diag = (await readDiag()) ?? {};
-            await logVoiceError(new Error(`voice-no-audio: ${JSON.stringify(diag)}`));
-            emit(`voice-no-audio ${JSON.stringify(diag)}`);
-          }
-          return;
-        }
-        if ((await stat(output)).size > 2_000_000) throw new Error('Reply audio too large');
-        audio = (await readFile(output)).toString('base64');
-      } else {
+      {
         await writeFile(input, Buffer.from(clip, 'base64'), {mode: 0o600});
         const extraArgs = requireWake ? ['--require', 'Nail'] : [];
         const notesSnapshot = meetingNotes.buildSnapshot(8000);
@@ -2672,7 +2962,9 @@ if (process.versions.electron) {
         autoVoiceAbort = null;
         autoVoicePhase = null;
       }
-      await restoreMeetMute(wc, read, click, micState.restoreMute);
+      if (provider !== 'antigravity') {
+        await restoreMeetMute(wc, read, click, micState.restoreMute);
+      }
       await rm(work, {recursive: true, force: true});
     }
   }
@@ -3257,4 +3549,6 @@ module.exports = {
   captureCodexHandsFreeWake,
   executeCodexHandsFreeTurn,
   executeCodexTurnWithFollowUp,
+  captureAntigravityAudio,
+  executeAntigravityTurn,
 };

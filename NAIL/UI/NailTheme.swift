@@ -14,6 +14,8 @@ extension Color {
 enum NeuTone: Equatable, Hashable, Sendable {
     case porcelain
     case obsidian
+    /// Always-light soft porcelain neumorphic surface (used for active/contrast elements in dark mode).
+    case alabaster
 }
 
 struct NailPalette: Sendable {
@@ -99,60 +101,125 @@ struct NailPalette: Sendable {
 
     // MARK: - Tone-Resolved Helpers
 
+    /// Returns the high-contrast neumorphic tone for active/selected elements.
+    /// In light mode on `.porcelain`, flips to `.obsidian`; in dark mode or on `.obsidian`, uses `.alabaster` (white neumorphism).
+    func activeContrastTone(for baseTone: NeuTone = .porcelain) -> NeuTone {
+        if isDark || baseTone == .obsidian {
+            return .alabaster
+        }
+        return .obsidian
+    }
+
     func primaryText(for tone: NeuTone) -> Color {
-        tone == .obsidian ? inkCardText : textPrimary
+        switch tone {
+        case .obsidian: inkCardText
+        case .alabaster: Color(hex: 0x161B26)
+        case .porcelain: textPrimary
+        }
     }
 
     func secondaryText(for tone: NeuTone) -> Color {
-        tone == .obsidian ? inkCardMuted : textSecondary
+        switch tone {
+        case .obsidian: inkCardMuted
+        case .alabaster: Color(hex: 0x5B6474)
+        case .porcelain: textSecondary
+        }
     }
 
     func tertiaryText(for tone: NeuTone) -> Color {
-        tone == .obsidian ? inkCardMuted.opacity(0.78) : textTertiary
+        switch tone {
+        case .obsidian: inkCardMuted.opacity(0.78)
+        case .alabaster: Color(hex: 0x7A8496)
+        case .porcelain: textTertiary
+        }
     }
 
     func hairline(for tone: NeuTone) -> Color {
-        tone == .obsidian ? inkCardLine : hairline
+        switch tone {
+        case .obsidian: inkCardLine
+        case .alabaster: Color(hex: 0x0F172A, alpha: 0.08)
+        case .porcelain: hairline
+        }
     }
 
     func hairlineStrong(for tone: NeuTone) -> Color {
-        tone == .obsidian ? Color.white.opacity(0.18) : hairlineStrong
+        switch tone {
+        case .obsidian: Color.white.opacity(0.18)
+        case .alabaster: Color(hex: 0x0F172A, alpha: 0.14)
+        case .porcelain: hairlineStrong
+        }
     }
 
     func surfaceTop(for tone: NeuTone) -> Color {
-        tone == .obsidian ? obsidianSurfaceTop : neuSurfaceTop
+        switch tone {
+        case .obsidian: obsidianSurfaceTop
+        case .alabaster: Color(hex: 0xF7F9FC)
+        case .porcelain: neuSurfaceTop
+        }
     }
 
     func surfaceBottom(for tone: NeuTone) -> Color {
-        tone == .obsidian ? obsidianSurfaceBottom : neuSurfaceBottom
+        switch tone {
+        case .obsidian: obsidianSurfaceBottom
+        case .alabaster: Color(hex: 0xE6EBF3)
+        case .porcelain: neuSurfaceBottom
+        }
     }
 
     func wellColor(for tone: NeuTone) -> Color {
-        tone == .obsidian ? obsidianWell : well
+        switch tone {
+        case .obsidian: obsidianWell
+        case .alabaster: Color(hex: 0xE5E9F1)
+        case .porcelain: well
+        }
     }
 
     func wellTop(for tone: NeuTone) -> Color {
-        tone == .obsidian ? obsidianWellTop : neuWellTop
+        switch tone {
+        case .obsidian: obsidianWellTop
+        case .alabaster: Color(hex: 0xDFE4EE)
+        case .porcelain: neuWellTop
+        }
     }
 
     func wellBottom(for tone: NeuTone) -> Color {
-        tone == .obsidian ? obsidianWellBottom : neuWellBottom
+        switch tone {
+        case .obsidian: obsidianWellBottom
+        case .alabaster: Color(hex: 0xEEF1F7)
+        case .porcelain: neuWellBottom
+        }
     }
 
     func shadowLight(for tone: NeuTone) -> Color {
-        tone == .obsidian ? obsidianShadowLight : neuShadowLight
+        switch tone {
+        case .obsidian: obsidianShadowLight
+        case .alabaster: isDark ? Color.white.opacity(0.24) : Color.white.opacity(0.95)
+        case .porcelain: neuShadowLight
+        }
     }
 
     func shadowDark(for tone: NeuTone) -> Color {
-        tone == .obsidian ? obsidianShadowDark : neuShadowDark
+        switch tone {
+        case .obsidian: obsidianShadowDark
+        case .alabaster: isDark ? Color(hex: 0x07090D, alpha: 0.65) : Color(hex: 0xB8C2D4, alpha: 0.62)
+        case .porcelain: neuShadowDark
+        }
     }
 
     func insetDark(for tone: NeuTone) -> Color {
-        tone == .obsidian ? obsidianInsetDark : neuInsetDark
+        switch tone {
+        case .obsidian: obsidianInsetDark
+        case .alabaster: Color(hex: 0xB2BDCE, alpha: 0.65)
+        case .porcelain: neuInsetDark
+        }
     }
 
     func insetLight(for tone: NeuTone) -> Color {
-        tone == .obsidian ? obsidianInsetLight : neuInsetLight
+        switch tone {
+        case .obsidian: obsidianInsetLight
+        case .alabaster: Color.white.opacity(0.94)
+        case .porcelain: neuInsetLight
+        }
     }
 
     // MARK: - Obsidian Ink Accent & High-Contrast Text
@@ -697,10 +764,10 @@ struct NeuRaisedBackground: View {
         } else {
             let rimTopColor: Color = isObsidian
                 ? palette.obsidianRimTop
-                : (palette.isDark ? Color.white.opacity(0.14) : Color.white.opacity(0.95))
+                : (tone == .alabaster || !palette.isDark ? Color.white.opacity(0.95) : Color.white.opacity(0.14))
             let rimMidColor: Color = isObsidian
                 ? palette.obsidianRimMid
-                : (palette.isDark ? Color.white.opacity(0.03) : Color.white.opacity(0.28))
+                : (tone == .alabaster || !palette.isDark ? Color.white.opacity(0.32) : Color.white.opacity(0.03))
             let rimBottomColor: Color = tint?.opacity(isObsidian || palette.isDark ? 0.34 : 0.24)
                 ?? palette.hairline(for: tone)
 
@@ -1004,9 +1071,14 @@ struct NeuWell<Content: View>: View {
 struct NeuAcousticDial<CenterContent: View>: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var standbyBreath = false
+    @State private var isHovered = false
     var size: CGFloat = 148
     var isActive: Bool = false
     var showYellowSpark: Bool = true
+    var mood: NailBotMood = .standby
+    var phase: Double = 0
+    var energy: Double = 0
     var tone: NeuTone = .porcelain
     @ViewBuilder var center: () -> CenterContent
 
@@ -1014,14 +1086,149 @@ struct NeuAcousticDial<CenterContent: View>: View {
         size: CGFloat = 148,
         isActive: Bool = false,
         showYellowSpark: Bool = true,
+        mood: NailBotMood = .standby,
+        phase: Double = 0,
+        energy: Double = 0,
         tone: NeuTone = .porcelain,
         @ViewBuilder center: @escaping () -> CenterContent
     ) {
         self.size = size
         self.isActive = isActive
         self.showYellowSpark = showYellowSpark
+        self.mood = mood
+        self.phase = phase
+        self.energy = energy
         self.tone = tone
         self.center = center
+    }
+
+    private struct DialArcSpec {
+        let trim: CGFloat
+        let rotationDegrees: Double
+        let startColor: Color
+        let endColor: Color
+        let glowColor: Color
+        let glowOpacity: Double
+        let glowRadius: CGFloat
+    }
+
+    private func dialArcSpec(palette: NailPalette) -> DialArcSpec {
+        let clampedEnergy = min(max(energy, 0.0), 1.0)
+        let activeOpacity = (isActive || isHovered) ? 0.98 : 0.88
+        let tipOpacity = (isActive || isHovered) ? 0.96 : 0.84
+
+        if reduceMotion {
+            let colors: (Color, Color) = switch mood {
+            case .interrupted:
+                (palette.warn, palette.goldBright)
+            case .error:
+                (palette.bad, palette.warn)
+            default:
+                (palette.good, palette.goldBright)
+            }
+            return DialArcSpec(
+                trim: 0.30,
+                rotationDegrees: -88,
+                startColor: colors.0.opacity(activeOpacity),
+                endColor: colors.1.opacity(tipOpacity),
+                glowColor: colors.0,
+                glowOpacity: isActive ? 0.34 : 0.10,
+                glowRadius: isActive ? 5 : 1.5
+            )
+        }
+
+        switch mood {
+        case .standby:
+            let hoverBoost = isHovered ? 0.06 : 0.0
+            let breathTrim = standbyBreath ? 0.34 : 0.24
+            let breathRotation = standbyBreath ? -74.0 : -92.0
+            return DialArcSpec(
+                trim: breathTrim + hoverBoost,
+                rotationDegrees: breathRotation,
+                startColor: palette.good.opacity(isHovered ? 0.96 : 0.88),
+                endColor: palette.goldBright.opacity(isHovered ? 0.94 : 0.84),
+                glowColor: palette.good,
+                glowOpacity: isHovered ? 0.28 : (standbyBreath ? 0.16 : 0.08),
+                glowRadius: isHovered ? 4.5 : (standbyBreath ? 3.0 : 1.5)
+            )
+
+        case .listening:
+            let pulse = 0.5 + 0.5 * sin(phase * 2.4)
+            let trim = min(0.62, 0.30 + clampedEnergy * 0.22 + pulse * 0.06)
+            let orbit = (phase * 24.0).truncatingRemainder(dividingBy: 360.0) - 88.0
+            return DialArcSpec(
+                trim: trim,
+                rotationDegrees: orbit,
+                startColor: palette.good.opacity(0.98),
+                endColor: palette.goldBright.opacity(0.94),
+                glowColor: palette.good,
+                glowOpacity: 0.28 + clampedEnergy * 0.16,
+                glowRadius: 4.5 + clampedEnergy * 2.5
+            )
+
+        case .processing:
+            let pulse = 0.5 + 0.5 * sin(phase * 3.0)
+            let trim = 0.22 + pulse * 0.08
+            let orbit = (phase * 95.0).truncatingRemainder(dividingBy: 360.0) - 88.0
+            return DialArcSpec(
+                trim: trim,
+                rotationDegrees: orbit,
+                startColor: palette.goldBright.opacity(0.98),
+                endColor: palette.good.opacity(0.94),
+                glowColor: palette.goldBright,
+                glowOpacity: 0.36,
+                glowRadius: 5.5
+            )
+
+        case .speaking:
+            let wave = 0.5 + 0.5 * sin(phase * 5.8)
+            let trim = min(0.76, 0.36 + clampedEnergy * 0.30 + wave * 0.08)
+            let orbit = (phase * 38.0).truncatingRemainder(dividingBy: 360.0) - 88.0
+            return DialArcSpec(
+                trim: trim,
+                rotationDegrees: orbit,
+                startColor: palette.good.opacity(0.99),
+                endColor: palette.goldBright.opacity(0.98),
+                glowColor: palette.good,
+                glowOpacity: 0.34 + clampedEnergy * 0.20,
+                glowRadius: 5.0 + clampedEnergy * 3.5
+            )
+
+        case .interrupted:
+            return DialArcSpec(
+                trim: 0.22,
+                rotationDegrees: -88.0,
+                startColor: palette.warn.opacity(0.95),
+                endColor: palette.goldBright.opacity(0.90),
+                glowColor: palette.warn,
+                glowOpacity: 0.26,
+                glowRadius: 4.0
+            )
+
+        case .error:
+            return DialArcSpec(
+                trim: 0.18,
+                rotationDegrees: -88.0,
+                startColor: palette.bad.opacity(0.95),
+                endColor: palette.warn.opacity(0.88),
+                glowColor: palette.bad,
+                glowOpacity: 0.26,
+                glowRadius: 4.0
+            )
+        }
+    }
+
+    private func updateStandbyBreath() {
+        guard mood == .standby, !reduceMotion else {
+            withAnimation(.easeOut(duration: 0.2)) {
+                standbyBreath = false
+            }
+            return
+        }
+        standbyBreath = false
+        withAnimation(.easeInOut(duration: 3.2).repeatForever(autoreverses: true)) {
+            standbyBreath = true
+        }
     }
 
     var body: some View {
@@ -1089,43 +1296,32 @@ struct NeuAcousticDial<CenterContent: View>: View {
             }
 
             if showYellowSpark {
+                let spec = dialArcSpec(palette: palette)
+                let tipCover = min(0.96, spec.trim + 0.04)
                 Circle()
-                    .trim(from: 0.0, to: 0.30)
+                    .trim(from: 0.0, to: spec.trim)
                     .stroke(
-                        LinearGradient(
+                        AngularGradient(
                             stops: [
-                                .init(
-                                    color: palette.good.opacity(isActive ? 0.98 : 0.88),
-                                    location: 0.0
-                                ),
-                                .init(
-                                    color: palette.good.opacity(isActive ? 0.96 : 0.84),
-                                    location: 0.68
-                                ),
-                                .init(
-                                    color: palette.goldBright.opacity(isActive ? 0.96 : 0.84),
-                                    location: 0.90
-                                ),
-                                .init(
-                                    color: palette.goldBright.opacity(isActive ? 0.96 : 0.84),
-                                    location: 1.0
-                                ),
+                                .init(color: spec.startColor, location: 0.0),
+                                .init(color: spec.startColor, location: spec.trim * 0.62),
+                                .init(color: spec.endColor, location: spec.trim * 0.92),
+                                .init(color: spec.endColor, location: tipCover),
+                                .init(color: spec.startColor, location: 0.985),
+                                .init(color: spec.startColor, location: 1.0),
                             ],
-                            startPoint: .trailing,
-                            endPoint: UnitPoint(x: 0.35, y: 0.98)
+                            center: .center,
+                            startAngle: .degrees(0),
+                            endAngle: .degrees(360)
                         ),
                         style: StrokeStyle(lineWidth: arcLineWidth, lineCap: .round)
                     )
                     .frame(width: ringSize, height: ringSize)
                     .shadow(
-                        color: palette.good.opacity(isActive ? 0.34 : 0.08),
-                        radius: isActive ? 5 : 1.5
+                        color: spec.glowColor.opacity(spec.glowOpacity),
+                        radius: spec.glowRadius
                     )
-                    .rotationEffect(.degrees(-88))
-                    .animation(
-                        reduceMotion ? nil : .easeInOut(duration: 0.25),
-                        value: isActive
-                    )
+                    .rotationEffect(.degrees(spec.rotationDegrees))
             }
 
             // 3. Concave inner well
@@ -1193,6 +1389,25 @@ struct NeuAcousticDial<CenterContent: View>: View {
             .frame(width: wellSize, height: wellSize)
         }
         .frame(width: size, height: size)
+        .contentShape(Circle())
+        .onHover { hovering in
+            guard !reduceMotion else {
+                isHovered = false
+                return
+            }
+            withAnimation(.easeInOut(duration: 0.24)) {
+                isHovered = hovering
+            }
+        }
+        .onAppear {
+            updateStandbyBreath()
+        }
+        .onChange(of: mood) { _, _ in
+            updateStandbyBreath()
+        }
+        .onChange(of: reduceMotion) { _, _ in
+            updateStandbyBreath()
+        }
         .animation(
             reduceMotion ? nil : .spring(response: 0.42, dampingFraction: 0.86),
             value: colorScheme
@@ -1421,11 +1636,10 @@ struct TalmoSegmentedPill<Option: Identifiable & Hashable>: View {
                     .padding(.vertical, compact ? 6 : 8)
                     .background {
                         if isSelected {
-                            let activeTone: NeuTone = tone == .obsidian ? .porcelain : .obsidian
                             NeuRaisedBackground(
                                 isCapsule: true,
                                 elevation: compact ? 0.50 : 0.65,
-                                tone: activeTone
+                                tone: activeSegmentTone(palette: palette)
                             )
                             .matchedGeometryEffect(id: "TalmoActiveSegment", in: pillNamespace)
                         }
@@ -1441,20 +1655,20 @@ struct TalmoSegmentedPill<Option: Identifiable & Hashable>: View {
         }
     }
 
-    private var activeSegmentTone: NeuTone {
-        tone == .obsidian ? .porcelain : .obsidian
+    private func activeSegmentTone(palette: NailPalette) -> NeuTone {
+        palette.activeContrastTone(for: tone)
     }
 
     private func segmentForeground(isSelected: Bool, palette: NailPalette) -> Color {
-        isSelected ? palette.primaryText(for: activeSegmentTone) : palette.secondaryText(for: tone)
+        isSelected ? palette.primaryText(for: activeSegmentTone(palette: palette)) : palette.secondaryText(for: tone)
     }
 
     private func badgeBackground(isSelected: Bool, palette: NailPalette) -> Color {
         if isSelected {
-            if activeSegmentTone == .obsidian {
+            if activeSegmentTone(palette: palette) == .obsidian {
                 return Color.white.opacity(0.18)
             }
-            return palette.accent.opacity(palette.isDark ? 0.18 : 0.10)
+            return Color(hex: 0x0F172A, alpha: 0.10)
         }
         if tone == .obsidian {
             return Color.white.opacity(0.08)
@@ -1463,7 +1677,7 @@ struct TalmoSegmentedPill<Option: Identifiable & Hashable>: View {
     }
 
     private func badgeForeground(isSelected: Bool, palette: NailPalette) -> Color {
-        isSelected ? palette.primaryText(for: activeSegmentTone) : palette.secondaryText(for: tone)
+        isSelected ? palette.primaryText(for: activeSegmentTone(palette: palette)) : palette.secondaryText(for: tone)
     }
 }
 
@@ -1485,12 +1699,11 @@ private struct NeuCircleIconButtonStyle: ButtonStyle {
         configuration.label
             .background {
                 if isActive {
-                    let activeTone: NeuTone = effectiveTone == .obsidian ? .porcelain : .obsidian
                     NeuRaisedBackground(
                         isCapsule: true,
                         elevation: pressed ? 0.45 : (isHovered ? 0.80 : 0.65),
                         isPressed: pressed,
-                        tone: activeTone
+                        tone: palette.activeContrastTone(for: effectiveTone)
                     )
                 } else {
                     NeuRaisedBackground(
@@ -1605,7 +1818,7 @@ struct TalmoCircleIconButton: View {
 
     private func iconForeground(palette: NailPalette, tone: NeuTone) -> Color {
         if isActive {
-            return tone == .obsidian ? Color(hex: 0x0A0A0A) : palette.inkCardText
+            return palette.primaryText(for: palette.activeContrastTone(for: tone))
         }
         return palette.primaryText(for: tone)
     }
@@ -1698,19 +1911,19 @@ struct NailPillButtonStyle: ButtonStyle {
         private func foregroundColor(palette: NailPalette) -> Color {
             switch variant {
             case .primary:
-                guard isEnabled else { return palette.textTertiary }
-                if let tone {
-                    return tone == .obsidian ? Color(hex: 0x0A0A0A) : palette.inkCardText
-                }
-                return palette.accentInk
+                guard isEnabled else { return palette.tertiaryText(for: resolvedTone) }
+                let contrastTone = palette.activeContrastTone(for: tone ?? .porcelain)
+                return palette.primaryText(for: contrastTone)
             case .obsidian:
                 return isEnabled ? palette.inkCardText : palette.inkCardMuted
-            case .porcelain, .inkPrimary:
-                return isEnabled ? Color(hex: 0x161B26) : Color(hex: 0x7A8496)
+            case .porcelain:
+                return isEnabled ? palette.primaryText(for: .porcelain) : palette.tertiaryText(for: .porcelain)
+            case .inkPrimary:
+                return isEnabled ? palette.primaryText(for: .alabaster) : palette.inkCardMuted
             case .secondary, .ghost:
-                return palette.primaryText(for: resolvedTone)
+                return isEnabled ? palette.primaryText(for: resolvedTone) : palette.tertiaryText(for: resolvedTone)
             case .inkSecondary:
-                return palette.inkCardText
+                return isEnabled ? palette.inkCardText : palette.inkCardMuted
             case .inkDanger:
                 return Color(hex: 0xF08A80)
             case .danger:
@@ -1728,11 +1941,7 @@ struct NailPillButtonStyle: ButtonStyle {
             switch variant {
             case .primary:
                 if isEnabled {
-                    let contrastTone: NeuTone = if let tone {
-                        tone == .obsidian ? .porcelain : .obsidian
-                    } else {
-                        palette.isDark ? .porcelain : .obsidian
-                    }
+                    let contrastTone = palette.activeContrastTone(for: tone ?? .porcelain)
                     NeuRaisedBackground(
                         isCapsule: true,
                         elevation: isHovered && !pressed ? baseElevation * 1.15 : baseElevation,
@@ -1751,13 +1960,25 @@ struct NailPillButtonStyle: ButtonStyle {
                     tone: .obsidian
                 )
 
-            case .porcelain, .inkPrimary:
+            case .porcelain:
                 NeuRaisedBackground(
                     isCapsule: true,
                     elevation: isHovered && !pressed ? baseElevation * 1.12 : baseElevation,
                     isPressed: pressed,
                     tone: .porcelain
                 )
+
+            case .inkPrimary:
+                if isEnabled {
+                    NeuRaisedBackground(
+                        isCapsule: true,
+                        elevation: isHovered && !pressed ? baseElevation * 1.15 : baseElevation,
+                        isPressed: pressed,
+                        tone: .alabaster
+                    )
+                } else {
+                    NeuInsetBackground(isCapsule: true, depth: 0.65, tone: .obsidian)
+                }
 
             case .secondary:
                 NeuRaisedBackground(
@@ -2330,7 +2551,7 @@ struct NeuChip: View {
 
     var body: some View {
         let palette = NailPalette(scheme: colorScheme)
-        let effectiveTone: NeuTone = isSelected ? (tone == .obsidian ? .porcelain : .obsidian) : tone
+        let effectiveTone: NeuTone = isSelected ? palette.activeContrastTone(for: tone) : tone
         let label = HStack(spacing: 5) {
             if let systemImage {
                 Image(systemName: systemImage)

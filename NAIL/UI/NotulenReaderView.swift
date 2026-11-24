@@ -321,7 +321,7 @@ struct NotulenReaderView: View {
         let isActive = activeFileURL == file.url
         let isHovered = hoveredFileURL == file.url
         let parsed = ParsedFilename.parse(file.name)
-        let rowTone: NeuTone = isSelected ? .obsidian : .porcelain
+        let rowTone: NeuTone = isSelected ? palette.activeContrastTone(for: .porcelain) : .porcelain
 
         return Button {
             if reduceMotion {
@@ -1844,7 +1844,7 @@ private struct NeuArchiveRowButtonStyle: ButtonStyle {
                             cornerRadius: 14,
                             elevation: 0.72,
                             isPressed: configuration.isPressed,
-                            tone: .obsidian
+                            tone: palette.activeContrastTone(for: .porcelain)
                         )
                         .matchedGeometryEffect(id: "SelectedNotulenBg", in: namespace)
                     } else if isHovered || configuration.isPressed {
