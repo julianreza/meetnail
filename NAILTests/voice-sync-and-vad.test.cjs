@@ -633,7 +633,7 @@ test('CodexLiveSession ignores benign cancellation errors and avoids splitting i
   );
 });
 
-test('meet-media.cjs codexConnect sets inPreRoll=0.10, outDelay=0.015, and uses 80ms srflx ICE timer', async () => {
+test('meet-media.cjs codexConnect sets inPreRoll=0.10, outDelay=0.015, and uses 150ms srflx ICE timer', async () => {
   const sandbox = createMediaSandbox({
     sampleProvider: () => new Float32Array(256).fill(0),
     initialIceGatheringState: 'gathering',
@@ -649,7 +649,7 @@ test('meet-media.cjs codexConnect sets inPreRoll=0.10, outDelay=0.015, and uses 
   const elapsed = Date.now() - startedAt;
 
   assert.ok(sdp.includes('m=audio'));
-  assert.ok(elapsed < 220, `Expected srflx ICE gathering timer (~80ms) to finish well under 220ms, got ${elapsed}ms`);
+  assert.ok(elapsed < 280, `Expected srflx ICE gathering timer (~150ms) to finish well under 280ms, got ${elapsed}ms`);
   assert.equal(sandbox.createdDelays.length, 2);
   assert.equal(sandbox.createdDelays[0].delayTime.value, 0.10);
   assert.equal(sandbox.createdDelays[1].delayTime.value, 0.015);

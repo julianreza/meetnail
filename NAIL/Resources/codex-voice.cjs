@@ -128,6 +128,8 @@ class CodexLiveSession {
     this.syncedNoteCursor = 0;
     this._notesSyncPromise = null;
     this._lastSyncedSlideText = '';
+    this._connectError = null;
+    this._needsFreshThread = false;
     this.cwd = null;
     this.child = null;
     this.rl = null;
@@ -316,16 +318,23 @@ class CodexLiveSession {
         return;
       }
       const err = new Error(classify(rawMsg));
+      err.stderr = `realtime-error: ${rawMsg}`;
       this.webrtcConnected = false;
       this.syncedNoteCursor = 0;
       this._lastSyncedSlideText = '';
+      this._needsFreshThread = true;
+      this._connectError = err;
       activeTurnState?.rejectTurn(err);
     } else if (message.method === 'thread/realtime/closed') {
       this.webrtcConnected = false;
       this.syncedNoteCursor = 0;
       this._lastSyncedSlideText = '';
+      this._needsFreshThread = true;
+      const closedErr = new Error('voice-codex-connection');
+      closedErr.stderr = 'realtime-closed';
+      this._connectError = closedErr;
       if (activeTurnState) {
-        activeTurnState.rejectTurn(new Error('voice-codex-connection'));
+        activeTurnState.rejectTurn(closedErr);
       }
     } else if (message.method === 'turn/started') {
       if (activeTurnState) {
@@ -551,31 +560,7 @@ class CodexLiveSession {
     if (!wc || wc.isDestroyed()) throw new Error('voice-codex-connection');
     progress?.('voice-codex-connecting');
     this._lastSyncedSlideText = '';
-    const sdp = await wc.executeJavaScript('window.__nailMedia.codexConnect()', true);
-    const {initialItems, cursor: snapshotCursor} = this.buildNotesInitialItems();
-    let usedInitialItems = false;
-    const startSession = async (withNotes = true) => {
-      usedInitialItems = Boolean(withNotes && initialItems);
-      return this.callRpc('thread/realtime/start', {
-        threadId: this.threadId,
-        version: 'v3',
-        model: 'gpt-live-1-codex',
-        voice: this.voice,
-        prompt: resolveStylePrompt(this.speakingStyle),
-        realtimeStartInstructions: DELEGATION_INSTRUCTIONS,
-        outputModality: 'audio',
-        includeStartupContext: false,
-        clientManagedHandoffs: false,
-        delegationAckFiller: false,
-        ...(usedInitialItems ? {initialItems} : {}),
-        transport: {type: 'webrtc', sdp},
-      });
-    };
-
-    try {
-      await startSession(true);
-    } catch (error) {
-      if (error.message !== 'voice-codex-error' || !this.child) throw error;
+    const startFreshThread = async () => {
       const {thread} = await this.callRpc('thread/start', {
         cwd: this.cwd,
         ephemeral: true,
@@ -583,26 +568,96 @@ class CodexLiveSession {
         approvalPolicy: 'never',
       });
       this.threadId = thread.id;
+      this._needsFreshThread = false;
       this._lastSyncedSlideText = '';
+    };
+
+    if (!this.threadId || this._needsFreshThread) {
+      await startFreshThread();
+    }
+
+    const {initialItems, cursor: snapshotCursor} = this.buildNotesInitialItems();
+    let lastIceState = 'unknown';
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (this.disposed || !wc || wc.isDestroyed()) throw new Error('voice-codex-connection');
+      if (attempt > 0) {
+        await this.disconnectWebRTC(wc).catch(() => {});
+        if (!this.child) throw new Error('voice-codex-connection');
+        await startFreshThread();
+      }
+      this._connectError = null;
+      const sdp = await wc.executeJavaScript('window.__nailMedia.codexConnect()', true);
+      let usedInitialItems = false;
+      const startSession = async (withNotes = true) => {
+        usedInitialItems = Boolean(withNotes && initialItems);
+        return this.callRpc('thread/realtime/start', {
+          threadId: this.threadId,
+          version: 'v3',
+          model: 'gpt-live-1-codex',
+          voice: this.voice,
+          prompt: resolveStylePrompt(this.speakingStyle),
+          realtimeStartInstructions: DELEGATION_INSTRUCTIONS,
+          outputModality: 'audio',
+          includeStartupContext: false,
+          clientManagedHandoffs: false,
+          delegationAckFiller: false,
+          ...(usedInitialItems ? {initialItems} : {}),
+          transport: {type: 'webrtc', sdp},
+        });
+      };
+
       try {
-        await startSession(true);
-      } catch (retryError) {
-        if (retryError.message !== 'voice-codex-error' || !initialItems || !this.child) throw retryError;
-        await startSession(false);
+        await startSession(attempt === 0);
+      } catch (error) {
+        if (error.message !== 'voice-codex-error' || !this.child) throw error;
+        await startFreshThread();
+        try {
+          await startSession(true);
+        } catch (retryError) {
+          if (retryError.message !== 'voice-codex-error' || !initialItems || !this.child) throw retryError;
+          await startSession(false);
+        }
+      }
+
+      const attemptDeadline = Date.now() + 7500;
+      while (!this.disposed && wc && !wc.isDestroyed() && Date.now() < attemptDeadline) {
+        if (this._connectError) {
+          if (this._connectError.message === 'voice-codex-quota' || this._connectError.message === 'voice-codex-login') {
+            const fatalErr = this._connectError;
+            this._connectError = null;
+            this._needsFreshThread = true;
+            await this.disconnectWebRTC(wc).catch(() => {});
+            throw fatalErr;
+          }
+          break;
+        }
+        const state = await wc.executeJavaScript('window.__nailMedia?.codexState?.()', true);
+        if (state?.iceState) lastIceState = state.iceState;
+        if (state?.connected) {
+          this.webrtcConnected = true;
+          this._needsFreshThread = false;
+          this._connectError = null;
+          if (usedInitialItems) this.syncedNoteCursor = snapshotCursor;
+          return;
+        }
+        if (state?.iceState === 'failed' || state?.iceState === 'closed') {
+          break;
+        }
+        await delay(30);
       }
     }
 
-    const deadline = Date.now() + 15_000;
-    while (!this.disposed && wc && !wc.isDestroyed() && Date.now() < deadline) {
-      const state = await wc.executeJavaScript('window.__nailMedia?.codexState?.()', true);
-      if (state?.connected) {
-        this.webrtcConnected = true;
-        if (usedInitialItems) this.syncedNoteCursor = snapshotCursor;
-        return;
-      }
-      await delay(30);
+    const lastErr = this._connectError;
+    this._connectError = null;
+    this._needsFreshThread = true;
+    await this.disconnectWebRTC(wc).catch(() => {});
+    if (lastErr && (lastErr.message === 'voice-codex-quota' || lastErr.message === 'voice-codex-login')) {
+      throw lastErr;
     }
-    throw new Error('voice-codex-connection');
+    const connErr = new Error('voice-codex-connection');
+    connErr.stderr = lastErr?.stderr || `webrtc-connect-timeout (lastIce=${lastIceState})`;
+    throw connErr;
   }
 
   async disconnectWebRTC(wc = this.activeWc) {

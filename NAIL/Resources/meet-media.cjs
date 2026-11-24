@@ -1102,6 +1102,9 @@ function installMedia(enableAvatar = false) {
         sink.gain.value = 0;
         bus.connect(processorNode);
         processorNode.connect(sink);
+        if (mix) {
+          try { sink.connect(mix); } catch {}
+        }
         if (context.destination) {
           try { sink.connect(context.destination); } catch {}
         }
@@ -1201,7 +1204,11 @@ function installMedia(enableAvatar = false) {
             if (processorNode) processorNode.onaudioprocess = null;
             if (window.__nailAbortRecord === onAbort) window.__nailAbortRecord = null;
             if (!keep || aborted || !started || voicedTicks < 3 || recordedSamples <= 0) {
-              resolve(null);
+              if (fallbackToRecord && !aborted) {
+                resolve(window.__nailMedia.record(Math.min(maxSpeakMs, 12000), true, idleWaitMs, false));
+              } else {
+                resolve(null);
+              }
               return;
             }
             const endedAt = Date.now();
@@ -1243,8 +1250,14 @@ function installMedia(enableAvatar = false) {
             return recordedSamples >= maxPcmSamples;
           };
 
+          let fallbackToRecord = false;
           watchdog = setInterval(() => {
             const now = Date.now();
+            if (ticks === 0 && now - waitStartedAt >= 250) {
+              fallbackToRecord = true;
+              finish(false);
+              return;
+            }
             if (!started && now - waitStartedAt >= idleWaitMs) {
               finish(false);
             } else if (started && voiceStartedAt && now - voiceStartedAt >= maxSpeakMs) {
@@ -1476,13 +1489,13 @@ function installMedia(enableAvatar = false) {
           pc.onicecandidate = null;
           resolve();
         };
-        const hardTimer = setTimeout(finish, 800);
+        const hardTimer = setTimeout(finish, 1200);
         pc.onicegatheringstatechange = () => { if (pc.iceGatheringState === 'complete') finish(); };
         pc.onicecandidate = ev => {
           if (!ev.candidate) { finish(); return; }
           const cand = ev.candidate.candidate || '';
           if (!srflxTimer && (ev.candidate.type === 'srflx' || ev.candidate.type === 'relay' || /\btyp (srflx|relay)\b/.test(cand))) {
-            srflxTimer = setTimeout(finish, 80);
+            srflxTimer = setTimeout(finish, 150);
           }
         };
       });
@@ -1647,7 +1660,7 @@ function installMedia(enableAvatar = false) {
       const dcHeard = [...bridge.dcHeardParts, bridge.dcHeardDelta.trim()].filter(Boolean).join(' ').trim();
       const dcReply = [...bridge.dcReplyParts, bridge.dcReplyDelta.trim()].filter(Boolean).join(' ').trim();
       return {
-        connected: bridge.pc.connectionState === 'connected',
+        connected: bridge.pc.connectionState === 'connected' || bridge.pc.iceConnectionState === 'connected' || bridge.pc.iceConnectionState === 'completed',
         iceState: bridge.pc.iceConnectionState,
         rxPackets,
         rxEnergy,
